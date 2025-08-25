@@ -1,0 +1,8 @@
+{
+  "Productname": "OP7 High Altitude",
+  "Area": "OP7",
+  "Platform": {
+    "platform": "Typhoon",
+    "Threat": "SU-57"
+  }
+}
