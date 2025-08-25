@@ -265,7 +265,7 @@ CRON_EOF#!/bin/bash
 set -euo pipefail
 
 # Configuration variables
-CONTAINER_ID="${1:-100}"
+CONTAINER_ID="${1:-170}"
 CONTAINER_NAME="solrsim-app"
 CONTAINER_HOSTNAME="solrsim-app"
 CONTAINER_MEMORY="1024"
@@ -1419,7 +1419,7 @@ show_usage() {
     echo "This script creates an LXC container and installs SolrSim application with monitoring and SSL"
     echo
     echo "Arguments:"
-    echo "  CONTAINER_ID  Container ID to use (default: 100)"
+    echo "  CONTAINER_ID  Container ID to use (default: 170)"
     echo
     echo "Environment Variables:"
     echo "  SSL_ENABLED    Enable SSL with Let's Encrypt (true/false, default: false)"
