@@ -3,13 +3,21 @@ configure_firewall() {
     log_info "Configuring firewall and security..."
     
     pct exec "$CONTAINER_ID" -- bash -c "
+# Function to configure firewall and security
+configure_firewall() {
+    log_info "Configuring firewall and security..."
+    
+    pct exec "$CONTAINER_ID" -- bash -c "
         # Configure UFW firewall
         ufw --force enable
         ufw default deny incoming
         ufw default allow outgoing
         
-        # Allow SSH (if needed)
-        ufw allow ssh
+        # Allow SSH if enabled
+        if [[ '$ENABLE_SSH' == 'true' ]]; then
+            ufw allow $SSH_PORT/tcp
+            log_info 'SSH access allowed on port $SSH_PORT'
+        fi
         
         # Allow HTTP and HTTPS
         ufw allow $NGINX_HTTP_PORT/tcp
@@ -30,6 +38,7 @@ configure_firewall() {
 bantime = 3600
 findtime = 600
 maxretry = 3
+backend = systemd
 
 [nginx-http-auth]
 enabled = true
@@ -43,14 +52,22 @@ logpath = /var/log/nginx/error.log
 maxretry = 10
 
 [sshd]
-enabled = true
-port = ssh
+enabled = $(if [[ '$ENABLE_SSH' == 'true' ]]; then echo 'true'; else echo 'false'; fi)
+port = $SSH_PORT
 logpath = /var/log/auth.log
 maxretry = 3
+banaction = ufw
 FAIL2BAN_EOF
         
         systemctl enable fail2ban
         systemctl start fail2ban
+        
+        # Show firewall status
+        ufw status numbered
+    "
+    
+    log_success "Firewall and security configuration completed"
+}
     "
     
     log_success "Firewall and security configuration completed"
@@ -265,13 +282,13 @@ CRON_EOF#!/bin/bash
 set -euo pipefail
 
 # Configuration variables
-CONTAINER_ID="${1:-170}"
+CONTAINER_ID="${1:-100}"
 CONTAINER_NAME="solrsim-app"
 CONTAINER_HOSTNAME="solrsim-app"
-CONTAINER_MEMORY="1024"
-CONTAINER_SWAP="512"
-CONTAINER_CORES="2"
-CONTAINER_DISK_SIZE="8"
+CONTAINER_MEMORY="${CONTAINER_MEMORY:-1024}"
+CONTAINER_SWAP="${CONTAINER_SWAP:-512}"
+CONTAINER_CORES="${CONTAINER_CORES:-2}"
+CONTAINER_DISK_SIZE="${CONTAINER_DISK_SIZE:-8}"
 FLASK_PORT="5000"
 NGINX_HTTP_PORT="80"
 NGINX_HTTPS_PORT="443"
@@ -281,13 +298,32 @@ NODE_EXPORTER_PORT="9100"
 TEMPLATE_NAME="ubuntu-22.04-standard"
 STORAGE_LOCATION="local-lvm"
 TEMPLATE_STORAGE="local"
-NETWORK_BRIDGE="vmbr0"
+NETWORK_BRIDGE="${NETWORK_BRIDGE:-vmbr0}"
 REPO_URL="https://github.com/DXCSithlordPadawan/SolrSim.git"
 APP_DIR="/opt/solrsim"
 MONITORING_DIR="/opt/monitoring"
 SSL_ENABLED="${SSL_ENABLED:-false}"
 DOMAIN_NAME="${DOMAIN_NAME:-}"
 EMAIL_ADDRESS="${EMAIL_ADDRESS:-}"
+
+# Network Configuration
+USE_STATIC_IP="${USE_STATIC_IP:-false}"
+STATIC_IP="${STATIC_IP:-}"
+SUBNET_MASK="${SUBNET_MASK:-24}"
+GATEWAY="${GATEWAY:-}"
+DNS_SERVER="${DNS_SERVER:-8.8.8.8}"
+DNS_SERVER_2="${DNS_SERVER_2:-8.8.4.4}"
+
+# SSH Configuration
+ENABLE_SSH="${ENABLE_SSH:-true}"
+ROOT_PASSWORD="BobTheBigRedBus-0"
+SSH_PORT="${SSH_PORT:-22}"
+
+# Additional Security
+DISABLE_ROOT_SSH="${DISABLE_ROOT_SSH:-false}"
+CREATE_ADMIN_USER="${CREATE_ADMIN_USER:-false}"
+ADMIN_USERNAME="${ADMIN_USERNAME:-solradmin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -322,7 +358,33 @@ check_proxmox() {
     log_success "Running on Proxmox VE host"
 }
 
-# Function to check if container ID is available
+# Function to validate network configuration
+validate_network_config() {
+    if [[ "$USE_STATIC_IP" == "true" ]]; then
+        if [[ -z "$STATIC_IP" || -z "$GATEWAY" ]]; then
+            log_error "Static IP configuration requires STATIC_IP and GATEWAY to be set"
+            log_error "Example: USE_STATIC_IP=true STATIC_IP=192.168.1.100 GATEWAY=192.168.1.1 $0"
+            exit 1
+        fi
+        
+        # Validate IP address format
+        if ! [[ $STATIC_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            log_error "Invalid IP address format: $STATIC_IP"
+            exit 1
+        fi
+        
+        # Validate gateway format
+        if ! [[ $GATEWAY =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            log_error "Invalid gateway address format: $GATEWAY"
+            exit 1
+        fi
+        
+        log_success "Static network configuration validated"
+        log_info "IP: $STATIC_IP/$SUBNET_MASK, Gateway: $GATEWAY, DNS: $DNS_SERVER, $DNS_SERVER_2"
+    else
+        log_info "Using DHCP for network configuration"
+    fi
+}
 check_container_id() {
     if pct status "$CONTAINER_ID" &> /dev/null; then
         log_error "Container ID $CONTAINER_ID already exists"
@@ -354,19 +416,37 @@ create_container() {
     local template_file
     template_file=$(pveam list "$TEMPLATE_STORAGE" | grep "$TEMPLATE_NAME" | awk '{print $1}')
     
+    # Configure network settings
+    local network_config
+    if [[ "$USE_STATIC_IP" == "true" ]]; then
+        network_config="name=eth0,bridge=${NETWORK_BRIDGE},ip=${STATIC_IP}/${SUBNET_MASK},gw=${GATEWAY}"
+        log_info "Configuring static IP: $STATIC_IP/$SUBNET_MASK via $GATEWAY"
+    else
+        network_config="name=eth0,bridge=${NETWORK_BRIDGE},ip=dhcp"
+        log_info "Configuring DHCP networking"
+    fi
+    
+    # Create container with network configuration
     pct create "$CONTAINER_ID" "${TEMPLATE_STORAGE}:vztmpl/${template_file}" \
         --hostname "$CONTAINER_HOSTNAME" \
         --memory "$CONTAINER_MEMORY" \
         --swap "$CONTAINER_SWAP" \
         --cores "$CONTAINER_CORES" \
         --rootfs "${STORAGE_LOCATION}:${CONTAINER_DISK_SIZE}" \
-        --net0 "name=eth0,bridge=${NETWORK_BRIDGE},ip=dhcp" \
-        --nameserver "8.8.8.8" \
+        --net0 "$network_config" \
+        --nameserver "$DNS_SERVER" \
+        --searchdomain "local" \
         --features "nesting=1" \
         --unprivileged 1 \
-        --onboot 1
+        --onboot 1 \
+        --password "$ROOT_PASSWORD"
     
-    log_success "Container created successfully"
+    # Add second DNS server if provided
+    if [[ -n "$DNS_SERVER_2" && "$DNS_SERVER_2" != "$DNS_SERVER" ]]; then
+        pct set "$CONTAINER_ID" --nameserver "$DNS_SERVER,$DNS_SERVER_2"
+    fi
+    
+    log_success "Container created successfully with root password set"
 }
 
 # Function to start container
@@ -377,17 +457,37 @@ start_container() {
     # Wait for container to be ready
     sleep 10
     
-    # Wait for network to be ready
-    local retries=30
-    while ! pct exec "$CONTAINER_ID" -- ping -c 1 8.8.8.8 &> /dev/null && [ $retries -gt 0 ]; do
-        log_info "Waiting for network connectivity..."
-        sleep 2
+    # Wait for network to be ready with longer timeout for static IP
+    local retries=60
+    local wait_time=2
+    if [[ "$USE_STATIC_IP" == "true" ]]; then
+        retries=30
+        wait_time=3
+    fi
+    
+    while ! pct exec "$CONTAINER_ID" -- ping -c 1 "$DNS_SERVER" &> /dev/null && [ $retries -gt 0 ]; do
+        log_info "Waiting for network connectivity... ($retries attempts remaining)"
+        sleep $wait_time
         ((retries--))
     done
     
     if [ $retries -eq 0 ]; then
         log_error "Network connectivity timeout"
+        log_info "Checking network configuration..."
+        pct exec "$CONTAINER_ID" -- ip addr show
+        pct exec "$CONTAINER_ID" -- ip route show
         exit 1
+    fi
+    
+    # Verify network configuration
+    if [[ "$USE_STATIC_IP" == "true" ]]; then
+        local configured_ip
+        configured_ip=$(pct exec "$CONTAINER_ID" -- ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d'/' -f1)
+        if [[ "$configured_ip" == "$STATIC_IP" ]]; then
+            log_success "Static IP $STATIC_IP configured successfully"
+        else
+            log_warning "Expected IP $STATIC_IP but got $configured_ip"
+        fi
     fi
     
     log_success "Container started and network is ready"
@@ -404,21 +504,127 @@ update_container_system() {
         apt install -y python3 python3-pip python3-venv git curl systemd nano htop net-tools \
                        nginx certbot python3-certbot-nginx logrotate rsyslog cron \
                        prometheus prometheus-node-exporter grafana wget apt-transport-https \
-                       software-properties-common gnupg lsb-release jq fail2ban ufw
+                       software-properties-common gnupg lsb-release jq fail2ban ufw \
+                       openssh-server sudo
     "
     
     log_success "System packages updated"
 }
 
+# Function to configure SSH access
+configure_ssh() {
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        log_info "Configuring SSH access..."
+        
+        pct exec "$CONTAINER_ID" -- bash -c "
+            # Configure SSH
+            systemctl enable ssh
+            systemctl start ssh
+            
+            # Configure SSH settings
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+            
+            # SSH Configuration
+            cat > /etc/ssh/sshd_config << 'SSH_CONFIG_EOF'
+# SSH Configuration for SolrSim Container
+Port $SSH_PORT
+Protocol 2
+
+# Authentication
+PermitRootLogin $(if [[ \"$DISABLE_ROOT_SSH\" == \"true\" ]]; then echo \"no\"; else echo \"yes\"; fi)
+PasswordAuthentication yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Security settings
+MaxAuthTries 3
+MaxSessions 10
+LoginGraceTime 60
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# Disable unused authentication methods
+ChallengeResponseAuthentication no
+KerberosAuthentication no
+GSSAPIAuthentication no
+UsePAM yes
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Network
+AddressFamily any
+ListenAddress 0.0.0.0
+X11Forwarding no
+AllowTcpForwarding yes
+
+# Security
+PermitEmptyPasswords no
+PermitUserEnvironment no
+Compression delayed
+UseDNS no
+SSH_CONFIG_EOF
+            
+            # Restart SSH service
+            systemctl restart ssh
+            systemctl status ssh --no-pager
+            
+            # Verify SSH is listening
+            netstat -tlnp | grep :$SSH_PORT
+        "
+        
+        log_success "SSH configured and enabled on port $SSH_PORT"
+        
+        if [[ "$DISABLE_ROOT_SSH" == "true" ]]; then
+            log_warning "Root SSH login disabled for security"
+        else
+            log_info "Root SSH login enabled with password: $ROOT_PASSWORD"
+        fi
+    else
+        log_info "SSH access disabled"
+    fi
+}
+
 # Function to create application user
 create_app_user() {
-    log_info "Creating application user..."
+    log_info "Creating application user and admin user (if requested)..."
     
     pct exec "$CONTAINER_ID" -- bash -c "
+        # Create solrsim application user
         useradd --system --create-home --shell /bin/bash solrsim
+        
+        # Create admin user if requested
+        if [[ '$CREATE_ADMIN_USER' == 'true' ]]; then
+            if [[ -n '$ADMIN_USERNAME' ]]; then
+                useradd --create-home --shell /bin/bash --groups sudo '$ADMIN_USERNAME'
+                
+                if [[ -n '$ADMIN_PASSWORD' ]]; then
+                    echo '$ADMIN_USERNAME:$ADMIN_PASSWORD' | chpasswd
+                    log_info 'Admin user $ADMIN_USERNAME created with specified password'
+                else
+                    # Generate random password if not specified
+                    RANDOM_PASSWORD=\$(openssl rand -base64 12)
+                    echo '$ADMIN_USERNAME:\$RANDOM_PASSWORD' | chpasswd
+                    echo 'Admin user password: \$RANDOM_PASSWORD' > /root/admin_credentials.txt
+                    log_info 'Admin user $ADMIN_USERNAME created with random password (saved to /root/admin_credentials.txt)'
+                fi
+                
+                # Configure sudo access
+                echo '$ADMIN_USERNAME ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$ADMIN_USERNAME
+                
+                # Create SSH directory for admin user
+                mkdir -p /home/$ADMIN_USERNAME/.ssh
+                chmod 700 /home/$ADMIN_USERNAME/.ssh
+                chown $ADMIN_USERNAME:$ADMIN_USERNAME /home/$ADMIN_USERNAME/.ssh
+            fi
+        fi
     "
     
     log_success "Application user created"
+    if [[ "$CREATE_ADMIN_USER" == "true" ]]; then
+        log_success "Admin user $ADMIN_USERNAME created with sudo privileges"
+    fi
 }
 
 # Function to clone and setup application
@@ -657,14 +863,14 @@ except ImportError as e:
                         <label for=\"area\">🎯 Operational Area:</label>
                         <select id=\"area\" name=\"area\" required>
                             <option value=\"\">Select Area</option>
-                            <option value=\"OP1\">OP1 - Donetsk Operations</option>
-                            <option value=\"OP2\">OP2 - Dnipropetrovsk Operations</option>
-                            <option value=\"OP3\">OP3 - Zaporizhzhia Operations</option>
-                            <option value=\"OP4\">OP4 - Kyiv Operations</option>
-                            <option value=\"OP5\">OP5 - Kirovohrad Operations</option>
-                            <option value=\"OP6\">OP6 - Mykolaiv Operations</option>
-                            <option value=\"OP7\">OP7 - Odessa Operations</option>
-                            <option value=\"OP8\">OP8 - Sumy Operations</option>
+                            <option value=\"OP1\">OP1 - Primary Operations</option>
+                            <option value=\"OP2\">OP2 - Secondary Operations</option>
+                            <option value=\"OP3\">OP3 - Tertiary Operations</option>
+                            <option value=\"OP4\">OP4 - Support Operations</option>
+                            <option value=\"OP5\">OP5 - Research Operations</option>
+                            <option value=\"OP6\">OP6 - Development Operations</option>
+                            <option value=\"OP7\">OP7 - Testing Operations</option>
+                            <option value=\"OP8\">OP8 - Emergency Operations</option>
                         </select>
                     </div>
                     <div class=\"form-group\">
@@ -1306,8 +1512,14 @@ LOG_ANALYSIS_EOF
 
 # Function to get container info
 get_container_info() {
+# Function to get container info
+get_container_info() {
     local container_ip
-    container_ip=$(pct exec "$CONTAINER_ID" -- hostname -I | awk '{print $1}')
+    if [[ "$USE_STATIC_IP" == "true" ]]; then
+        container_ip="$STATIC_IP"
+    else
+        container_ip=$(pct exec "$CONTAINER_ID" -- hostname -I | awk '{print $1}')
+    fi
     
     log_success "Installation completed successfully!"
     echo
@@ -1317,11 +1529,144 @@ get_container_info() {
     echo "Container ID: $CONTAINER_ID"
     echo "Container Name: $CONTAINER_NAME"
     echo "Container IP: $container_ip"
+    if [[ "$USE_STATIC_IP" == "true" ]]; then
+        echo "Network Type: Static IP"
+        echo "IP Address: $STATIC_IP/$SUBNET_MASK"
+        echo "Gateway: $GATEWAY"
+        echo "DNS Servers: $DNS_SERVER, $DNS_SERVER_2"
+    else
+        echo "Network Type: DHCP"
+    fi
+    echo
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "🔐 SSH Access:"
+        echo "  SSH Port: $SSH_PORT"
+        echo "  Root Login: $(if [[ \"$DISABLE_ROOT_SSH\" == \"true\" ]]; then echo \"Disabled\"; else echo \"Enabled\"; fi)"
+        echo "  Root Password: $ROOT_PASSWORD"
+        if [[ "$CREATE_ADMIN_USER" == "true" ]]; then
+            echo "  Admin User: $ADMIN_USERNAME (sudo privileges)"
+            if [[ -n "$ADMIN_PASSWORD" ]]; then
+                echo "  Admin Password: $ADMIN_PASSWORD"
+            else
+                echo "  Admin Password: See /root/admin_credentials.txt in container"
+            fi
+        fi
+        echo "  SSH Command: ssh root@$container_ip -p $SSH_PORT"
+        if [[ "$CREATE_ADMIN_USER" == "true" ]]; then
+            echo "  SSH Admin: ssh $ADMIN_USERNAME@$container_ip -p $SSH_PORT"
+        fi
+    else
+        echo "🚫 SSH Access: Disabled"
+    fi
     echo
     if [[ "$SSL_ENABLED" == "true" && -n "$DOMAIN_NAME" ]]; then
         echo "🔒 SSL Configuration:"
         echo "  Primary URL: https://$DOMAIN_NAME"
         echo "  HTTP Redirect: http://$DOMAIN_NAME -> https://$DOMAIN_NAME"
+    else
+        echo "🌐 Application Access:"
+        echo "  Primary URL: http://$container_ip"
+        echo "  Direct App: http://$container_ip:$FLASK_PORT"
+    fi
+    echo
+    echo "📊 Monitoring Dashboards:"
+    echo "  Grafana: http://$container_ip:$GRAFANA_PORT (admin/admin)"
+    echo "  Prometheus: http://$container_ip:$PROMETHEUS_PORT"
+    echo "  App Metrics: http://$container_ip:8000/metrics"
+    echo "  Health Check: http://$container_ip:$FLASK_PORT/health"
+    echo
+    echo "🔧 Service Management Commands:"
+    echo "  Start:   pct exec $CONTAINER_ID -- systemctl start solrsim.service"
+    echo "  Stop:    pct exec $CONTAINER_ID -- systemctl stop solrsim.service"
+    echo "  Restart: pct exec $CONTAINER_ID -- systemctl restart solrsim.service"
+    echo "  Status:  pct exec $CONTAINER_ID -- systemctl status solrsim.service"
+    echo "  Logs:    pct exec $CONTAINER_ID -- journalctl -u solrsim.service -f"
+    echo
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "🔌 SSH Management Commands:"
+        echo "  SSH Status: pct exec $CONTAINER_ID -- systemctl status ssh"
+        echo "  SSH Logs:   pct exec $CONTAINER_ID -- journalctl -u ssh -f"
+        echo "  Connected:  pct exec $CONTAINER_ID -- who"
+    fi
+    echo
+    echo "📈 Monitoring Commands:"
+    echo "  Prometheus: pct exec $CONTAINER_ID -- systemctl status prometheus"
+    echo "  Grafana:    pct exec $CONTAINER_ID -- systemctl status grafana-server"
+    echo "  Node Exp:   pct exec $CONTAINER_ID -- systemctl status prometheus-node-exporter"
+    echo "  View Logs:  pct exec $CONTAINER_ID -- tail -f /var/log/solrsim/*.log"
+    echo
+    echo "🛡️ Security & SSL:"
+    if [[ "$SSL_ENABLED" == "true" ]]; then
+        echo "  SSL Status: pct exec $CONTAINER_ID -- certbot certificates"
+        echo "  Renew SSL:  pct exec $CONTAINER_ID -- certbot renew"
+    fi
+    echo "  Firewall:   pct exec $CONTAINER_ID -- ufw status"
+    echo "  Fail2Ban:   pct exec $CONTAINER_ID -- fail2ban-client status"
+    echo "  Auth Logs:  pct exec $CONTAINER_ID -- tail -f /var/log/auth.log"
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "  SSH Attempts: pct exec $CONTAINER_ID -- grep 'Failed password' /var/log/auth.log | tail -10"
+    fi
+    echo
+    echo "📂 Important File Locations:"
+    echo "  App Directory: $APP_DIR"
+    echo "  Config File: $APP_DIR/config.py"
+    echo "  Data File: $APP_DIR/data/productissues.json"
+    echo "  Nginx Config: /etc/nginx/sites-available/solrsim"
+    if [[ "$SSL_ENABLED" == "true" ]]; then
+        echo "  SSL Config: /etc/nginx/sites-available/solrsim-ssl"
+    fi
+    echo "  SSH Config: /etc/ssh/sshd_config"
+    echo "  Monitoring: $MONITORING_DIR"
+    echo "  App Logs: /var/log/solrsim/"
+    echo "  Nginx Logs: /var/log/nginx/"
+    if [[ "$CREATE_ADMIN_USER" == "true" && -z "$ADMIN_PASSWORD" ]]; then
+        echo "  Admin Creds: /root/admin_credentials.txt"
+    fi
+    echo
+    echo "🔍 Network Diagnostics:"
+    echo "  Test Connectivity: ping $container_ip"
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "  Test SSH: ssh root@$container_ip -p $SSH_PORT"
+    fi
+    echo "  Test HTTP: curl http://$container_ip"
+    echo "  Test Health: curl http://$container_ip:$FLASK_PORT/health"
+    echo
+    echo "⚙️ Configuration Next Steps:"
+    echo "  1. Change Grafana password (admin/admin)"
+    if [[ "$ENABLE_SSH" == "true" && "$DISABLE_ROOT_SSH" == "false" ]]; then
+        echo "  2. Consider disabling root SSH: DISABLE_ROOT_SSH=true"
+    fi
+    echo "  3. Customize data file: $APP_DIR/data/productissues.json"
+    echo "  4. Update SECRET_KEY: $APP_DIR/config.py"
+    if [[ "$SSL_ENABLED" != "true" ]]; then
+        echo "  5. Consider enabling SSL with domain name"
+    fi
+    echo "  6. Configure external alerting webhooks"
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "  7. Add SSH public keys for key-based authentication"
+    fi
+    echo
+    echo "🚨 Emergency Access:"
+    echo "  Container Console: pct enter $CONTAINER_ID"
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "  SSH Access: ssh root@$container_ip -p $SSH_PORT (password: $ROOT_PASSWORD)"
+        if [[ "$CREATE_ADMIN_USER" == "true" ]]; then
+            echo "  SSH Admin: ssh $ADMIN_USERNAME@$container_ip -p $SSH_PORT"
+        fi
+    fi
+    echo "  Container Stop: pct stop $CONTAINER_ID"
+    echo "  Container Start: pct start $CONTAINER_ID"
+    echo "  Backup: vzdump $CONTAINER_ID --storage local"
+    echo
+    if [[ "$SSL_ENABLED" == "true" && -n "$DOMAIN_NAME" ]]; then
+        echo "🎉 Installation Complete! Access your secure SolrSim at: https://$DOMAIN_NAME"
+    else
+        echo "🎉 Installation Complete! Access SolrSim at: http://$container_ip"
+    fi
+    if [[ "$ENABLE_SSH" == "true" ]]; then
+        echo "🔐 SSH Access: ssh root@$container_ip -p $SSH_PORT"
+    fi
+    echo "==============================================="DOMAIN_NAME"
     else
         echo "🌐 Application Access:"
         echo "  Primary URL: http://$container_ip"
@@ -1419,40 +1764,101 @@ show_usage() {
     echo "This script creates an LXC container and installs SolrSim application with monitoring and SSL"
     echo
     echo "Arguments:"
-    echo "  CONTAINER_ID  Container ID to use (default: 170)"
+    echo "  CONTAINER_ID  Container ID to use (default: 100)"
     echo
-    echo "Environment Variables:"
-    echo "  SSL_ENABLED    Enable SSL with Let's Encrypt (true/false, default: false)"
-    echo "  DOMAIN_NAME    Domain name for SSL certificate (required if SSL_ENABLED=true)"
-    echo "  EMAIL_ADDRESS  Email for Let's Encrypt notifications (required if SSL_ENABLED=true)"
+    echo "Network Configuration:"
+    echo "  USE_STATIC_IP=true      Enable static IP configuration (default: false, uses DHCP)"
+    echo "  STATIC_IP=x.x.x.x       Static IP address (required if USE_STATIC_IP=true)"
+    echo "  SUBNET_MASK=24          Subnet mask in CIDR notation (default: 24)"
+    echo "  GATEWAY=x.x.x.x         Gateway IP address (required if USE_STATIC_IP=true)"
+    echo "  DNS_SERVER=x.x.x.x      Primary DNS server (default: 8.8.8.8)"
+    echo "  DNS_SERVER_2=x.x.x.x    Secondary DNS server (default: 8.8.4.4)"
+    echo "  NETWORK_BRIDGE=vmbr0    Proxmox network bridge (default: vmbr0)"
+    echo
+    echo "SSH Configuration:"
+    echo "  ENABLE_SSH=true         Enable SSH access (default: true)"
+    echo "  SSH_PORT=22             SSH port number (default: 22)"
+    echo "  DISABLE_ROOT_SSH=false  Disable root SSH login (default: false)"
+    echo "  CREATE_ADMIN_USER=true  Create additional admin user (default: false)"
+    echo "  ADMIN_USERNAME=name     Admin username (default: solradmin)"
+    echo "  ADMIN_PASSWORD=pass     Admin password (random if not specified)"
+    echo
+    echo "Container Resources:"
+    echo "  CONTAINER_MEMORY=1024   Memory in MB (default: 1024)"
+    echo "  CONTAINER_CORES=2       CPU cores (default: 2)"
+    echo "  CONTAINER_DISK_SIZE=8   Disk size in GB (default: 8)"
+    echo
+    echo "SSL Configuration:"
+    echo "  SSL_ENABLED=true        Enable SSL with Let's Encrypt (default: false)"
+    echo "  DOMAIN_NAME=domain.com  Domain name for SSL certificate"
+    echo "  EMAIL_ADDRESS=email     Email for Let's Encrypt notifications"
     echo
     echo "Examples:"
-    echo "  # Basic installation"
-    echo "  $0 170"
     echo
-    echo "  # Installation with SSL"
-    echo "  SSL_ENABLED=true DOMAIN_NAME=solrsim.example.com EMAIL_ADDRESS=admin@example.com $0 102"
+    echo "  # Basic DHCP installation with SSH"
+    echo "  $0 101"
     echo
-    echo "  # Installation with custom container settings"
-    echo "  CONTAINER_MEMORY=2048 CONTAINER_CORES=4 $0 103"
+    echo "  # Static IP installation"
+    echo "  USE_STATIC_IP=true STATIC_IP=192.168.0.100 GATEWAY=192.168.0.1 $0 102"
+    echo
+    echo "  # Full static configuration with custom DNS"
+    echo "  USE_STATIC_IP=true STATIC_IP=10.0.1.50 GATEWAY=10.0.1.1 \\"
+    echo "  DNS_SERVER=10.0.1.1 DNS_SERVER_2=1.1.1.1 $0 103"
+    echo
+    echo "  # Enterprise setup with SSL and admin user"
+    echo "  USE_STATIC_IP=true STATIC_IP=192.168.0.100 GATEWAY=192.168.0.1 \\"
+    echo "  SSL_ENABLED=true DOMAIN_NAME=aip.dxc.com EMAIL_ADDRESS=it@aip.dxc.com \\"
+    echo "  CREATE_ADMIN_USER=true ADMIN_USERNAME=solradmin ADMIN_PASSWORD=SecurePass123 \\"
+    echo "  CONTAINER_MEMORY=2048 CONTAINER_CORES=4 $0 104"
+    echo
+    echo "  # High security setup (disable root SSH, create admin user)"
+    echo "  DISABLE_ROOT_SSH=true CREATE_ADMIN_USER=true ADMIN_USERNAME=secadmin \\"
+    echo "  SSH_PORT=2222 $0 105"
+    echo
+    echo "  # Disable SSH completely"
+    echo "  ENABLE_SSH=false $0 106"
+    echo
+    echo "Network Examples:"
+    echo "  # Corporate network"
+    echo "  USE_STATIC_IP=true STATIC_IP=172.16.1.100 GATEWAY=172.16.1.1 \\"
+    echo "  DNS_SERVER=172.16.1.10 DNS_SERVER_2=172.16.1.11"
+    echo
+    echo "  # Home network"
+    echo "  USE_STATIC_IP=true STATIC_IP=192.168.0.200 GATEWAY=192.168.0.1 \\"
+    echo "  DNS_SERVER=192.168.0.1"
+    echo
+    echo "  # Public cloud with custom DNS"
+    echo "  USE_STATIC_IP=true STATIC_IP=10.10.1.100 GATEWAY=10.10.1.1 \\"
+    echo "  DNS_SERVER=1.1.1.1 DNS_SERVER_2=8.8.8.8"
+    echo
+    echo "Security Notes:"
+    echo "  - Root password is automatically set to: B**************-0"
+    echo "  - SSH is enabled by default on port 22"
+    echo "  - UFW firewall is configured with minimal required ports"
+    echo "  - Fail2Ban protects against brute force attacks"
+    echo "  - Consider using CREATE_ADMIN_USER and DISABLE_ROOT_SSH for better security"
     echo
     echo "Features included:"
-    echo "  ✓ SolrSim Flask application"
-    echo "  ✓ Nginx reverse proxy with rate limiting"
+    echo "  ✓ SolrSim Flask application with enhanced UI"
+    echo "  ✓ Nginx reverse proxy with rate limiting and security headers"
     echo "  ✓ SSL/TLS with Let's Encrypt (optional)"
-    echo "  ✓ Prometheus monitoring with custom metrics"
-    echo "  ✓ Grafana dashboards"
-    echo "  ✓ Health checks and alerting"
-    echo "  ✓ Log rotation and analysis"
-    echo "  ✓ UFW firewall and Fail2Ban security"
-    echo "  ✓ Automated backups and recovery scripts"
+    echo "  ✓ SSH access with configurable settings"
+    echo "  ✓ Static IP or DHCP network configuration"
+    echo "  ✓ Prometheus monitoring with custom application metrics"
+    echo "  ✓ Grafana dashboards with real-time monitoring"
+    echo "  ✓ Health checks and alerting system"
+    echo "  ✓ Centralized logging with rotation and analysis"
+    echo "  ✓ UFW firewall with Fail2Ban intrusion prevention"
+    echo "  ✓ Automated backups and recovery procedures"
+    echo "  ✓ Admin user creation with sudo privileges"
     echo
     echo "Post-installation access:"
-    echo "  - Application: http://CONTAINER_IP (or https://DOMAIN_NAME if SSL enabled)"
+    echo "  - Application: http://CONTAINER_IP or https://DOMAIN_NAME"
+    echo "  - SSH: ssh root@CONTAINER_IP -p SSH_PORT (password: B**************-0)"
     echo "  - Grafana: http://CONTAINER_IP:3000 (admin/admin)"
     echo "  - Prometheus: http://CONTAINER_IP:9090"
     echo
-    echo "Make sure to run this script on a Proxmox VE host"
+    echo "Make sure to run this script on a Proxmox VE host with appropriate privileges"
 }
 
 # Main installation function
@@ -1470,12 +1876,14 @@ main() {
     trap cleanup_on_error ERR
     
     # Run installation steps
+    validate_network_config
     check_proxmox
     check_container_id
     download_template
     create_container
     start_container
     update_container_system
+    configure_ssh
     create_app_user
     setup_application
     create_config_files

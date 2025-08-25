@@ -15,7 +15,7 @@ This guide will help you create an LXC container on Proxmox and deploy the SolrS
 1. **Create Container**:
    - Navigate to your Proxmox node → Create CT
    - **General**: 
-     - CT ID: Choose available ID (e.g., 170)
+     - CT ID: Choose available ID (e.g., 100)
      - Hostname: `solrsim-app`
      - Resource Pool: (optional)
    - **Template**:
@@ -37,7 +37,7 @@ This guide will help you create an LXC container on Proxmox and deploy the SolrS
 
 2. **Start the Container**:
    ```bash
-   pct start 170
+   pct start 100
    ```
 
 ### Using CLI (Alternative)
@@ -68,7 +68,7 @@ pct start 100
 
 ```bash
 # From Proxmox host
-pct enter 170
+pct enter 100
 
 # Or via console in web interface
 ```
@@ -416,16 +416,16 @@ journalctl -u solrsim.service -f
 
 ```bash
 # Stop container
-pct stop 170
+pct stop 100
 
 # Start container
-pct start 170
+pct start 100
 
 # Restart container
-pct reboot 170
+pct reboot 100
 
 # Enter container
-pct enter 170
+pct enter 100
 
 # View container status
 pct list
@@ -435,7 +435,7 @@ pct list
 
 ```bash
 # Create backup from Proxmox host
-vzdump 170 --storage local
+vzdump 100 --storage local
 
 # Restore from backup
 # Use Proxmox web interface: Restore → select backup file
