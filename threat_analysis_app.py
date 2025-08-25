@@ -43,29 +43,46 @@ def threat_check():
     if area not in valid_areas:
         return jsonify({"error": f"Invalid area. Must be one of: {', '.join(valid_areas)}"}), 400
     
-    # Load product issues data
-    issues_data = load_json_file('productissues.json')
-    product = get_product_by_area(issues_data, area)
-    
-    if not product:
-        return jsonify({"error": f"No product found for area {area}"}), 404
-    
     matches = []
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Check each platform for threat matches
-    for platform_data in product.get("Platforms", []):
-        platform = platform_data.get("platform")
-        threats = platform_data.get("Threats", [])
-        
-        if threat in threats:
-            matches.append({
-                "platform": platform,
-                "message": "Threat Active - No Action Possible",
-                "timestamp": timestamp,
-                "threat": threat,
-                "area": area
-            })
+    # Check product issues data first (critical threats)
+    issues_data = load_json_file('productissues.json')
+    issues_product = get_product_by_area(issues_data, area)
+    
+    if issues_product:
+        for platform_data in issues_product.get("Platforms", []):
+            platform = platform_data.get("platform")
+            threats = platform_data.get("Threats", [])
+            
+            if threat in threats:
+                matches.append({
+                    "platform": platform,
+                    "message": "Threat Active - No Action Possible",
+                    "timestamp": timestamp,
+                    "threat": threat,
+                    "area": area,
+                    "type": "critical"
+                })
+    
+    # Check product concessions data (regeneration needed)
+    concessions_data = load_json_file('productconcessions.json')
+    concessions_product = get_product_by_area(concessions_data, area)
+    
+    if concessions_product:
+        for platform_data in concessions_product.get("Platforms", []):
+            platform = platform_data.get("platform")
+            threats = platform_data.get("Threats", [])
+            
+            if threat in threats:
+                matches.append({
+                    "platform": platform,
+                    "message": "Threat Detected - Product Regeneration Required",
+                    "timestamp": timestamp,
+                    "threat": threat,
+                    "area": area,
+                    "type": "regeneration"
+                })
     
     return jsonify({
         "area": area,
@@ -90,13 +107,26 @@ def get_current_products():
 
 @app.route('/api/conceded-products')
 def get_conceded_products():
-    """Get conceded products with regeneration suggestions"""
+    """Get conceded products without regeneration suggestions"""
     concessions_data = load_json_file('productconcessions.json')
     
     grouped_products = {}
     for product in concessions_data.get("Products", []):
         area = product.get("Area")
-        product["suggestion"] = "Product should be regenerated"
+        if area not in grouped_products:
+            grouped_products[area] = []
+        grouped_products[area].append(product)
+    
+    return jsonify(grouped_products)
+
+@app.route('/api/issue-products')
+def get_issue_products():
+    """Get products with issues from productissues.json"""
+    issues_data = load_json_file('productissues.json')
+    
+    grouped_products = {}
+    for product in issues_data.get("Products", []):
+        area = product.get("Area")
         if area not in grouped_products:
             grouped_products[area] = []
         grouped_products[area].append(product)
@@ -114,8 +144,7 @@ if __name__ == '__main__':
         os.makedirs('templates')
     
     # Create the HTML template
-    html_template = '''
-<!DOCTYPE html>
+    html_template = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -313,15 +342,6 @@ if __name__ == '__main__':
             color: #666;
         }
         
-        .suggestion {
-            background: #fff3e0;
-            color: #ef6c00;
-            padding: 10px;
-            border-radius: 5px;
-            margin-top: 10px;
-            font-weight: 600;
-        }
-        
         .loading {
             text-align: center;
             padding: 40px;
@@ -340,6 +360,7 @@ if __name__ == '__main__':
             <button class="tab active" onclick="showTab('threat-check')">Threat Analysis</button>
             <button class="tab" onclick="showTab('current-products')">Current Products</button>
             <button class="tab" onclick="showTab('conceded-products')">Conceded Products</button>
+            <button class="tab" onclick="showTab('issue-products')">Issue with Products</button>
         </div>
         
         <div class="tab-content">
@@ -385,8 +406,15 @@ if __name__ == '__main__':
             <!-- Conceded Products Tab -->
             <div id="conceded-products" class="tab-pane">
                 <h2>Conceded Products</h2>
-                <p>View conceded products that require regeneration.</p>
+                <p>View conceded products grouped by operational area.</p>
                 <div id="concededProductsContent" class="loading">Loading conceded products...</div>
+            </div>
+            
+            <!-- Issue Products Tab -->
+            <div id="issue-products" class="tab-pane">
+                <h2>Issue with Products</h2>
+                <p>View products with known issues grouped by operational area.</p>
+                <div id="issueProductsContent" class="loading">Loading issue products...</div>
             </div>
         </div>
     </div>
@@ -415,6 +443,8 @@ if __name__ == '__main__':
                 loadCurrentProducts();
             } else if (tabId === 'conceded-products') {
                 loadConcededProducts();
+            } else if (tabId === 'issue-products') {
+                loadIssueProducts();
             }
         }
 
@@ -464,23 +494,52 @@ if __name__ == '__main__':
                 return;
             }
             
-            let html = `
-                <div class="results">
+            // Separate critical threats from regeneration needed
+            const criticalThreats = data.matches.filter(m => m.type === 'critical');
+            const regenerationNeeded = data.matches.filter(m => m.type === 'regeneration');
+            
+            let html = '<div class="results">';
+            
+            // Show critical threats first
+            if (criticalThreats.length > 0) {
+                html += `
                     <div class="alert alert-danger">
-                        <strong>WARNING: ${data.total_matches} Threat(s) Detected</strong><br>
+                        <strong>CRITICAL: ${criticalThreats.length} Active Threat(s) Detected</strong><br>
                         The following platforms are vulnerable to "${data.threat}" in ${data.area}:
                     </div>
-            `;
+                `;
+                
+                criticalThreats.forEach(match => {
+                    html += `
+                        <div class="platform" style="background: #ffebee; color: #c62828; margin: 10px 0;">
+                            <strong>Platform:</strong> ${match.platform}<br>
+                            <strong>Status:</strong> ${match.message}<br>
+                            <strong>Timestamp:</strong> ${match.timestamp}
+                        </div>
+                    `;
+                });
+            }
             
-            data.matches.forEach(match => {
+            // Show regeneration needed threats
+            if (regenerationNeeded.length > 0) {
                 html += `
-                    <div class="platform" style="background: #ffebee; color: #c62828; margin: 10px 0;">
-                        <strong>Platform:</strong> ${match.platform}<br>
-                        <strong>Status:</strong> ${match.message}<br>
-                        <strong>Timestamp:</strong> ${match.timestamp}
+                    <div class="alert alert-warning">
+                        <strong>WARNING: ${regenerationNeeded.length} Platform(s) Require Regeneration</strong><br>
+                        The following platforms have concessions for "${data.threat}" in ${data.area}:
                     </div>
                 `;
-            });
+                
+                regenerationNeeded.forEach(match => {
+                    html += `
+                        <div class="platform" style="background: #fff8e1; color: #f57c00; margin: 10px 0;">
+                            <strong>Platform:</strong> ${match.platform}<br>
+                            <strong>Status:</strong> ${match.message}<br>
+                            <strong>Action Required:</strong> Product should be regenerated<br>
+                            <strong>Timestamp:</strong> ${match.timestamp}
+                        </div>
+                    `;
+                });
+            }
             
             html += '</div>';
             resultsDiv.innerHTML = html;
@@ -494,7 +553,7 @@ if __name__ == '__main__':
                 const response = await fetch('/api/current-products');
                 const data = await response.json();
                 
-                displayProducts(data, contentDiv, false);
+                displayProducts(data, contentDiv);
             } catch (error) {
                 contentDiv.innerHTML = `<div class="alert alert-danger">Error loading current products: ${error.message}</div>`;
             }
@@ -508,13 +567,27 @@ if __name__ == '__main__':
                 const response = await fetch('/api/conceded-products');
                 const data = await response.json();
                 
-                displayProducts(data, contentDiv, true);
+                displayProducts(data, contentDiv);
             } catch (error) {
                 contentDiv.innerHTML = `<div class="alert alert-danger">Error loading conceded products: ${error.message}</div>`;
             }
         }
 
-        function displayProducts(data, container, showSuggestions) {
+        async function loadIssueProducts() {
+            const contentDiv = document.getElementById('issueProductsContent');
+            contentDiv.innerHTML = '<div class="loading">Loading issue products...</div>';
+            
+            try {
+                const response = await fetch('/api/issue-products');
+                const data = await response.json();
+                
+                displayProducts(data, contentDiv);
+            } catch (error) {
+                contentDiv.innerHTML = `<div class="alert alert-danger">Error loading issue products: ${error.message}</div>`;
+            }
+        }
+
+        function displayProducts(data, container) {
             if (Object.keys(data).length === 0) {
                 container.innerHTML = '<div class="alert alert-warning">No products found.</div>';
                 return;
@@ -549,10 +622,6 @@ if __name__ == '__main__':
                         html += '</div>';
                     }
                     
-                    if (showSuggestions && product.suggestion) {
-                        html += `<div class="suggestion">RECOMMENDATION: ${product.suggestion}</div>`;
-                    }
-                    
                     html += '</div>';
                 });
                 
@@ -568,8 +637,7 @@ if __name__ == '__main__':
         });
     </script>
 </body>
-</html>
-    '''
+</html>'''
     
     # Write the HTML template to file with UTF-8 encoding
     with open('templates/index.html', 'w', encoding='utf-8') as f:
