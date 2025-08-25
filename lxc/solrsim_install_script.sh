@@ -1428,7 +1428,7 @@ show_usage() {
     echo
     echo "Examples:"
     echo "  # Basic installation"
-    echo "  $0 101"
+    echo "  $0 170"
     echo
     echo "  # Installation with SSL"
     echo "  SSL_ENABLED=true DOMAIN_NAME=solrsim.example.com EMAIL_ADDRESS=admin@example.com $0 102"
