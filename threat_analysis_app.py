@@ -12,8 +12,10 @@ def load_json_file(filename):
         with open(filename, 'r') as file:
             return json.load(file)
     except FileNotFoundError:
+        print(f"Warning: {filename} not found")
         return {"Products": []}
     except json.JSONDecodeError:
+        print(f"Warning: Error parsing {filename}")
         return {"Products": []}
 
 def get_product_by_area(data, area):
@@ -138,13 +140,9 @@ def get_all_areas():
     """Get list of all valid areas"""
     return jsonify(["OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8"])
 
-if __name__ == '__main__':
-    # Create templates directory if it doesn't exist
-    if not os.path.exists('templates'):
-        os.makedirs('templates')
-    
-    # Create the HTML template
-    html_template = '''<!DOCTYPE html>
+def create_html_template():
+    """Create the HTML template file"""
+    html_content = '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -357,15 +355,15 @@ if __name__ == '__main__':
         </header>
         
         <div class="tabs">
-            <button class="tab active" onclick="showTab('threat-check')">Threat Analysis</button>
-            <button class="tab" onclick="showTab('current-products')">Current Products</button>
-            <button class="tab" onclick="showTab('conceded-products')">Conceded Products</button>
-            <button class="tab" onclick="showTab('issue-products')">Issue with Products</button>
+            <button class="tab" id="tab-threat-check">Threat Analysis</button>
+            <button class="tab active" id="tab-current-products">Current Products</button>
+            <button class="tab" id="tab-conceded-products">Conceded Products</button>
+            <button class="tab" id="tab-issue-products">Issue with Products</button>
         </div>
         
         <div class="tab-content">
             <!-- Threat Check Tab -->
-            <div id="threat-check" class="tab-pane active">
+            <div id="threat-check" class="tab-pane">
                 <h2>Threat Analysis</h2>
                 <p>Enter an area and threat to check for platform vulnerabilities.</p>
                 
@@ -397,7 +395,7 @@ if __name__ == '__main__':
             </div>
             
             <!-- Current Products Tab -->
-            <div id="current-products" class="tab-pane">
+            <div id="current-products" class="tab-pane active">
                 <h2>Current Products</h2>
                 <p>View all current products grouped by operational area.</p>
                 <div id="currentProductsContent" class="loading">Loading current products...</div>
@@ -420,42 +418,75 @@ if __name__ == '__main__':
     </div>
 
     <script>
-        // Tab switching functionality
-        function showTab(tabId) {
-            // Hide all tab panes
-            document.querySelectorAll('.tab-pane').forEach(pane => {
+        // Global variables
+        let currentActiveTab = 'threat-check';
+
+        // Tab switching function - more aggressive approach
+        function activateTab(tabId) {
+            console.log('Activating tab:', tabId);
+            
+            // Hide all tab panes with force
+            const panes = document.querySelectorAll('.tab-pane');
+            panes.forEach(pane => {
                 pane.classList.remove('active');
+                pane.style.display = 'none'; // Force hide
+                console.log('Force hidden pane:', pane.id);
             });
             
-            // Remove active class from all tabs
-            document.querySelectorAll('.tab').forEach(tab => {
+            // Remove active class from all tab buttons with force
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => {
                 tab.classList.remove('active');
+                tab.style.backgroundColor = ''; // Reset background
+                tab.style.color = ''; // Reset color
+                console.log('Reset tab button:', tab.id);
             });
             
-            // Show selected tab pane
-            document.getElementById(tabId).classList.add('active');
+            // Show the selected tab pane with force
+            const targetPane = document.getElementById(tabId);
+            if (targetPane) {
+                targetPane.classList.add('active');
+                targetPane.style.display = 'block'; // Force show
+                console.log('Force shown pane:', tabId);
+            } else {
+                console.error('Target pane not found:', tabId);
+            }
             
-            // Add active class to clicked tab
-            event.target.classList.add('active');
+            // Activate the corresponding tab button with force
+            const tabButton = document.getElementById('tab-' + tabId);
+            if (tabButton) {
+                tabButton.classList.add('active');
+                tabButton.style.backgroundColor = '#3498db'; // Force blue background
+                tabButton.style.color = 'white'; // Force white text
+                console.log('Force activated tab button:', 'tab-' + tabId);
+            } else {
+                console.error('Tab button not found:', 'tab-' + tabId);
+            }
             
-            // Load data for specific tabs
+            // Store current tab
+            currentActiveTab = tabId;
+            
+            // Load data for specific tabs (but NOT for threat-check)
             if (tabId === 'current-products') {
+                console.log('Loading current products data');
                 loadCurrentProducts();
             } else if (tabId === 'conceded-products') {
+                console.log('Loading conceded products data');
                 loadConcededProducts();
             } else if (tabId === 'issue-products') {
+                console.log('Loading issue products data');
                 loadIssueProducts();
+            } else if (tabId === 'threat-check') {
+                console.log('Threat-check tab activated - no data loading needed');
             }
+            
+            console.log('Tab activation complete for:', tabId);
         }
 
-        // Threat analysis form submission
-        document.getElementById('threatForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            
-            const area = document.getElementById('area').value;
-            const threat = document.getElementById('threat').value;
+        // Function to execute threat analysis
+        async function executeThreatAnalysis(area, threat) {
+            console.log('Executing threat analysis for:', area, threat);
             const resultsDiv = document.getElementById('threatResults');
-            
             resultsDiv.innerHTML = '<div class="loading">Analyzing threat...</div>';
             
             try {
@@ -472,72 +503,74 @@ if __name__ == '__main__':
                 if (response.ok) {
                     displayThreatResults(data);
                 } else {
-                    resultsDiv.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+                    resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
                 }
             } catch (error) {
-                resultsDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+                resultsDiv.innerHTML = '<div class="alert alert-danger">Error: ' + error.message + '</div>';
             }
-        });
+        }
+
+        // Parse URL query parameters
+        function parseURLQuery() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const query = urlParams.get('query');
+            
+            if (query) {
+                console.log('Found URL query:', query);
+                const parts = query.split(',');
+                if (parts.length === 2) {
+                    const area = parts[0].trim().toUpperCase();
+                    const threat = parts[1].trim();
+                    
+                    console.log('Parsed query - Area:', area, 'Threat:', threat);
+                    
+                    // Switch to threat analysis tab
+                    activateTab('threat-check');
+                    
+                    // Set form values and execute
+                    setTimeout(() => {
+                        const areaSelect = document.getElementById('area');
+                        const threatInput = document.getElementById('threat');
+                        
+                        if (areaSelect && threatInput) {
+                            areaSelect.value = area;
+                            threatInput.value = threat;
+                            console.log('Form populated, executing analysis...');
+                            executeThreatAnalysis(area, threat);
+                        } else {
+                            console.error('Form elements not found');
+                        }
+                    }, 300);
+                }
+            }
+        }
 
         function displayThreatResults(data) {
             const resultsDiv = document.getElementById('threatResults');
             
             if (data.matches.length === 0) {
-                resultsDiv.innerHTML = `
-                    <div class="results">
-                        <div class="alert alert-success">
-                            <strong>No Threats Detected</strong><br>
-                            No platforms in ${data.area} are vulnerable to threat "${data.threat}".
-                        </div>
-                    </div>
-                `;
+                resultsDiv.innerHTML = '<div class="results"><div class="alert alert-success"><strong>No Threats Detected</strong><br>No platforms in ' + data.area + ' are vulnerable to threat "' + data.threat + '".</div></div>';
                 return;
             }
             
-            // Separate critical threats from regeneration needed
             const criticalThreats = data.matches.filter(m => m.type === 'critical');
             const regenerationNeeded = data.matches.filter(m => m.type === 'regeneration');
             
             let html = '<div class="results">';
             
-            // Show critical threats first
             if (criticalThreats.length > 0) {
-                html += `
-                    <div class="alert alert-danger">
-                        <strong>CRITICAL: ${criticalThreats.length} Active Threat(s) Detected</strong><br>
-                        The following platforms are vulnerable to "${data.threat}" in ${data.area}:
-                    </div>
-                `;
+                html += '<div class="alert alert-danger"><strong>CRITICAL: ' + criticalThreats.length + ' Active Threat(s) Detected</strong><br>The following platforms are vulnerable to "' + data.threat + '" in ' + data.area + ':</div>';
                 
                 criticalThreats.forEach(match => {
-                    html += `
-                        <div class="platform" style="background: #ffebee; color: #c62828; margin: 10px 0;">
-                            <strong>Platform:</strong> ${match.platform}<br>
-                            <strong>Status:</strong> ${match.message}<br>
-                            <strong>Timestamp:</strong> ${match.timestamp}
-                        </div>
-                    `;
+                    html += '<div class="platform" style="background: #ffebee; color: #c62828; margin: 10px 0;"><strong>Platform:</strong> ' + match.platform + '<br><strong>Status:</strong> ' + match.message + '<br><strong>Timestamp:</strong> ' + match.timestamp + '</div>';
                 });
             }
             
-            // Show regeneration needed threats
             if (regenerationNeeded.length > 0) {
-                html += `
-                    <div class="alert alert-warning">
-                        <strong>WARNING: ${regenerationNeeded.length} Platform(s) Require Regeneration</strong><br>
-                        The following platforms have concessions for "${data.threat}" in ${data.area}:
-                    </div>
-                `;
+                html += '<div class="alert alert-warning"><strong>WARNING: ' + regenerationNeeded.length + ' Platform(s) Require Regeneration</strong><br>The following platforms have concessions for "' + data.threat + '" in ' + data.area + ':</div>';
                 
                 regenerationNeeded.forEach(match => {
-                    html += `
-                        <div class="platform" style="background: #fff8e1; color: #f57c00; margin: 10px 0;">
-                            <strong>Platform:</strong> ${match.platform}<br>
-                            <strong>Status:</strong> ${match.message}<br>
-                            <strong>Action Required:</strong> Product should be regenerated<br>
-                            <strong>Timestamp:</strong> ${match.timestamp}
-                        </div>
-                    `;
+                    html += '<div class="platform" style="background: #fff8e1; color: #f57c00; margin: 10px 0;"><strong>Platform:</strong> ' + match.platform + '<br><strong>Status:</strong> ' + match.message + '<br><strong>Action Required:</strong> Product should be regenerated<br><strong>Timestamp:</strong> ' + match.timestamp + '</div>';
                 });
             }
             
@@ -552,10 +585,9 @@ if __name__ == '__main__':
             try {
                 const response = await fetch('/api/current-products');
                 const data = await response.json();
-                
                 displayProducts(data, contentDiv);
             } catch (error) {
-                contentDiv.innerHTML = `<div class="alert alert-danger">Error loading current products: ${error.message}</div>`;
+                contentDiv.innerHTML = '<div class="alert alert-danger">Error loading current products: ' + error.message + '</div>';
             }
         }
 
@@ -566,10 +598,9 @@ if __name__ == '__main__':
             try {
                 const response = await fetch('/api/conceded-products');
                 const data = await response.json();
-                
                 displayProducts(data, contentDiv);
             } catch (error) {
-                contentDiv.innerHTML = `<div class="alert alert-danger">Error loading conceded products: ${error.message}</div>`;
+                contentDiv.innerHTML = '<div class="alert alert-danger">Error loading conceded products: ' + error.message + '</div>';
             }
         }
 
@@ -580,10 +611,9 @@ if __name__ == '__main__':
             try {
                 const response = await fetch('/api/issue-products');
                 const data = await response.json();
-                
                 displayProducts(data, contentDiv);
             } catch (error) {
-                contentDiv.innerHTML = `<div class="alert alert-danger">Error loading issue products: ${error.message}</div>`;
+                contentDiv.innerHTML = '<div class="alert alert-danger">Error loading issue products: ' + error.message + '</div>';
             }
         }
 
@@ -596,28 +626,15 @@ if __name__ == '__main__':
             let html = '';
             
             Object.keys(data).forEach(area => {
-                html += `
-                    <div class="product-group">
-                        <div class="product-group-header">
-                            AREA: ${area} - ${data[area].length} Product(s)
-                        </div>
-                `;
+                html += '<div class="product-group"><div class="product-group-header">AREA: ' + area + ' - ' + data[area].length + ' Product(s)</div>';
                 
                 data[area].forEach(product => {
-                    html += `
-                        <div class="product-item">
-                            <strong>${product.Productname}</strong>
-                    `;
+                    html += '<div class="product-item"><strong>' + product.Productname + '</strong>';
                     
                     if (product.Platforms) {
                         html += '<div class="platform-list">';
                         product.Platforms.forEach(platform => {
-                            html += `
-                                <div class="platform">
-                                    PLATFORM: <strong>${platform.platform}</strong>
-                                    <div class="threats">Threats: ${platform.Threats.join(', ')}</div>
-                                </div>
-                            `;
+                            html += '<div class="platform">PLATFORM: <strong>' + platform.platform + '</strong><div class="threats">Threats: ' + platform.Threats.join(', ') + '</div></div>';
                         });
                         html += '</div>';
                     }
@@ -631,20 +648,107 @@ if __name__ == '__main__':
             container.innerHTML = html;
         }
 
-        // Load current products on page load
-        window.addEventListener('load', function() {
+        // Initialize when DOM is ready
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM ready, initializing...');
+            
+            // Set up tab click handlers
+            document.getElementById('tab-threat-check').addEventListener('click', () => {
+                console.log('Threat Analysis tab clicked');
+                activateTab('threat-check');
+            });
+            document.getElementById('tab-current-products').addEventListener('click', () => {
+                console.log('Current Products tab clicked');
+                activateTab('current-products');
+            });
+            document.getElementById('tab-conceded-products').addEventListener('click', () => {
+                console.log('Conceded Products tab clicked');
+                activateTab('conceded-products');
+            });
+            document.getElementById('tab-issue-products').addEventListener('click', () => {
+                console.log('Issue Products tab clicked');
+                activateTab('issue-products');
+            });
+            
+            // Set up form submission
+            document.getElementById('threatForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const area = document.getElementById('area').value;
+                const threat = document.getElementById('threat').value;
+                console.log('Form submitted with area:', area, 'threat:', threat);
+                executeThreatAnalysis(area, threat);
+            });
+            
+            // Load initial data
+            console.log('Loading initial current products...');
             loadCurrentProducts();
+            
+            // Check for URL query parameters - simplified approach
+            setTimeout(() => {
+                console.log('Checking for URL query parameters...');
+                
+                // Direct check for query parameter
+                const urlParams = new URLSearchParams(window.location.search);
+                const query = urlParams.get('query');
+                
+                console.log('Direct URL query check result:', query);
+                
+                if (query && query.includes(',')) {
+                    console.log('URL query found, processing threat analysis');
+                    const parts = query.split(',');
+                    const area = parts[0].trim().toUpperCase();
+                    const threat = parts[1].trim();
+                    
+                    console.log('URL query - Area:', area, 'Threat:', threat);
+                    
+                    // Activate threat analysis tab
+                    activateTab('threat-check');
+                    
+                    // Set form values
+                    setTimeout(() => {
+                        document.getElementById('area').value = area;
+                        document.getElementById('threat').value = threat;
+                        console.log('Form set from URL query');
+                        executeThreatAnalysis(area, threat);
+                    }, 100);
+                    
+                } else {
+                    console.log('No valid URL query found, setting default to Current Products tab');
+                    activateTab('current-products');
+                }
+            }, 50);
         });
     </script>
 </body>
 </html>'''
     
-    # Write the HTML template to file with UTF-8 encoding
-    with open('templates/index.html', 'w', encoding='utf-8') as f:
-        f.write(html_template)
+    return html_content
+
+if __name__ == '__main__':
+    # Create templates directory if it doesn't exist
+    if not os.path.exists('templates'):
+        os.makedirs('templates')
+        print("Created templates directory")
     
+    # Create the HTML template file
+    try:
+        with open('templates/index.html', 'w', encoding='utf-8') as f:
+            f.write(create_html_template())
+        print("Created HTML template successfully")
+    except Exception as e:
+        print(f"Error creating HTML template: {e}")
+        exit(1)
+    
+    print("\n" + "="*60)
     print("Starting Threat Analysis Web Application...")
-    print("Make sure your JSON files (productissues.json, currentproduct.json, productconcessions.json) are in the same directory as this script")
-    print("Access the application at: http://localhost:5000")
+    print("Make sure your JSON files are in the same directory:")
+    print("  - productissues.json")
+    print("  - currentproduct.json") 
+    print("  - productconcessions.json")
+    print("\nAccess the application at: http://localhost:5000")
+    print("\nURL Query Examples:")
+    print("  - http://localhost:5000/?query=OP7,S500")
+    print("  - http://localhost:5000/?query=OP7,SA-29")
+    print("="*60 + "\n")
     
     app.run(debug=True, host='0.0.0.0', port=5000)
