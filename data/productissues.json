@@ -6,11 +6,11 @@
       "Platforms": [
         {
           "platform": "Typhoon",
-          "Threats": ["SU-57", "SU-34"]
+          "Threats": ["S500"]
         },
         {
           "platform": "C-130",
-          "Threats": ["SU-57", "SU-34"]
+          "Threats": ["SA-24", "STRELA-3", "SA-13"]
         }
       ]
     }
