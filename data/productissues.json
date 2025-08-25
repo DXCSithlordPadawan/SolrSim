@@ -1,0 +1,18 @@
+{
+  "Products": [
+    {
+      "Productname": "OP7 High Altitude",
+      "Area": "OP7",
+      "Platforms": [
+        {
+          "platform": "Typhoon",
+          "Threats": ["SU-57", "SU-34"]
+        },
+        {
+          "platform": "C-130",
+          "Threats": ["SU-57", "SU-34"]
+        }
+      ]
+    }
+  ]
+}
