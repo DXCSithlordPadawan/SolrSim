@@ -1,6 +1,6 @@
 ```bash
 # Installation with SSL
-SSL_ENABLED=true DOMAIN_NAME=solrsim.example.com EMAIL_ADDRESS=admin@example.com ./solrsim_install.sh 102
+SSL_ENABLED=true DOMAIN_NAME=solrsim.example.com EMAIL_ADDRESS=admin@example.com ./solrsim_install.sh 170
 
 # Custom resource allocation
 CONTAINER_MEMORY=2048 CONTAINER_CORES=4 SSL_ENABLED=true DOMAIN_NAME=app.company.com EMAIL_ADDRESS=it@company.com ./solrsim_install.sh 103
@@ -77,4 +77,5 @@ pct stop CONTAINER_ID && pct start CONTAINER_ID
 
 This enhanced script transforms a simple Flask app deployment into a enterprise-grade, monitored, and secured application platform. 
 The monitoring stack provides complete visibility into application performance and system health, while the SSL integration ensures secure communications. 
+
 All components are configured to work together seamlessly with minimal manual intervention required.
