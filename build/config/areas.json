@@ -1,0 +1,15 @@
+{
+  "valid_areas": [
+    "OP1",
+    "OP2", 
+    "OP3",
+    "OP4",
+    "OP5",
+    "OP6",
+    "OP7",
+    "OP8"
+  ],
+  "description": "Valid operational areas for threat analysis",
+  "last_updated": "2025-08-28T00:00:00Z",
+  "version": "1.0"
+}

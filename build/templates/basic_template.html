@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Threat Analysis System</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .severity-low { background-color: #d4edda; }
+        .severity-medium { background-color: #fff3cd; }
+        .severity-high { background-color: #f8d7da; }
+        .severity-critical { background-color: #f5c6cb; }
+        .navbar-brand { font-weight: bold; }
+        .card-header { font-weight: 600; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container">
+            <span class="navbar-brand">
+                <i class="fas fa-shield-alt"></i> Threat Analysis System
+            </span>
+            <span class="navbar-text">
+                <i class="fas fa-exclamation-triangle"></i> 
+                Total Threats: <span id="threat-count">{{ threats|length }}</span>
+            </span>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- Add New Threat Form -->
+        <div class="row mb-4">
+            <div class="col-md-8 mx-auto">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="fas fa-plus-circle"></i> Report New Threat
+                    </div>
+                    <div class="card-body">
+                        <form id="threat-form">
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="threat_type" class="form-label">Threat Type</label>
+                                    <select class="form-select" id="threat_type" name="threat_type" required>
+                                        <option value="">Select threat type...</option>
+                                        <option value="Security Breach">Security Breach</option>
+                                        <option value="System Failure">System Failure</option>
+                                        <option value="Physical Threat">Physical Threat</option>
+                                        <option value="Cyber Attack">Cyber Attack</option>
+                                        <option value="Environmental">Environmental</option>
+                                        <option value="Personnel">Personnel</option>
+                                        <option value="Other">Other</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label for="area" class="form-label">Area</label>
+                                    <select class="form-select" id="area" name="area" required>
+                                        <option value="">Select area...</option>
+                                        {% for area in valid_areas %}
+                                        <option value="{{ area }}">{{ area }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="severity" class="form-label">Severity</label>
+                                    <select class="form-select" id="severity" name="severity" required>
+                                        <option value="">Select severity...</option>
+                                        <option value="Low">Low</option>
+                                        <option value="Medium">Medium</option>
+                                        <option value="High">High</option>
+                                        <option value="Critical">Critical</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label for="reporter" class="form-label">Reporter (Optional)</label>
+                                    <input type="text" class="form-control" id="reporter" name="reporter" placeholder="Your name">
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label for="description" class="form-label">Description</label>
+                                <textarea class="form-control" id="description" name="description" rows="3" required placeholder="Describe the threat in detail..."></textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-paper-plane"></i> Submit Threat Report
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Current Threats -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-secondary text-white">
+                        <i class="fas fa-list"></i> Current Threats
+                    </div>
+                    <div class="card-body">
+                        <div id="threats-container">
+                            {% if threats %}
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead class="table-dark">
+                                            <tr>
+                                                <th>ID</th>
+                                                <th>Type</th>
+                                                <th>Area</th>
+                                                <th>Severity</th>
+                                                <th>Description</th>
+                                                <th>Reporter</th>
+                                                <th>Status</th>
+                                                <th>Timestamp</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for threat in threats %}
+                                            <tr class="severity-{{ threat.severity.lower() }}">
+                                                <td><strong>#{{ threat.id }}</strong></td>
+                                                <td>{{ threat.threat_type }}</td>
+                                                <td><span class="badge bg-info">{{ threat.area }}</span></td>
+                                                <td>
+                                                    <span class="badge bg-{% if threat.severity == 'Critical' %}danger{% elif threat.severity == 'High' %}warning{% elif threat.severity == 'Medium' %}info{% else %}success{% endif %}">
+                                                        {{ threat.severity }}
+                                                    </span>
+                                                </td>
+                                                <td>{{ threat.description[:50] }}{% if threat.description|length > 50 %}...{% endif %}</td>
+                                                <td>{{ threat.reporter or 'Anonymous' }}</td>
+                                                <td>
+                                                    <span class="badge bg-{% if threat.status == 'Active' %}danger{% elif threat.status == 'Resolved' %}success{% else %}warning{% endif %}">
+                                                        {{ threat.status }}
+                                                    </span>
+                                                </td>
+                                                <td>{{ threat.timestamp[:19] }}</td>
+                                                <td>
+                                                    <div class="btn-group btn-group-sm">
+                                                        <button class="btn btn-outline-warning btn-sm" onclick="updateThreatStatus({{ threat.id }}, 'Investigating')">
+                                                            <i class="fas fa-search"></i>
+                                                        </button>
+                                                        <button class="btn btn-outline-success btn-sm" onclick="updateThreatStatus({{ threat.id }}, 'Resolved')">
+                                                            <i class="fas fa-check"></i>
+                                                        </button>
+                                                        <button class="btn btn-outline-danger btn-sm" onclick="deleteThreat({{ threat.id }})">
+                                                            <i class="fas fa-trash"></i>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            {% else %}
+                                <div class="text-center text-muted py-4">
+                                    <i class="fas fa-shield-alt fa-3x mb-3"></i>
+                                    <h5>No threats reported</h5>
+                                    <p>System is secure. Use the form above to report any threats.</p>
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert Modal -->
+    <div class="modal fade" id="alertModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="alertTitle">Alert</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="alertMessage"></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">OK</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Form submission
+        document.getElementById('threat-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const data = Object.fromEntries(formData.entries());
+            
+            fetch('/api/threats', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showAlert('Error', data.error);
+                } else {
+                    showAlert('Success', 'Threat reported successfully!');
+                    e.target.reset();
+                    setTimeout(() => location.reload(), 1000);
+                }
+            })
+            .catch(error => {
+                showAlert('Error', 'Failed to submit threat report');
+                console.error('Error:', error);
+            });
+        });
+        
+        // Update threat status
+        function updateThreatStatus(threatId, status) {
+            fetch(`/api/threats/${threatId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ status: status })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showAlert('Error', data.error);
+                } else {
+                    showAlert('Success', `Threat #${threatId} status updated to ${status}`);
+                    setTimeout(() => location.reload(), 1000);
+                }
+            })
+            .catch(error => {
+                showAlert('Error', 'Failed to update threat status');
+                console.error('Error:', error);
+            });
+        }
+        
+        // Delete threat
+        function deleteThreat(threatId) {
+            if (confirm('Are you sure you want to delete this threat?')) {
+                fetch(`/api/threats/${threatId}`, {
+                    method: 'DELETE'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        showAlert('Error', data.error);
+                    } else {
+                        showAlert('Success', `Threat #${threatId} deleted`);
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                })
+                .catch(error => {
+                    showAlert('Error', 'Failed to delete threat');
+                    console.error('Error:', error);
+                });
+            }
+        }
+        
+        // Show alert modal
+        function showAlert(title, message) {
+            document.getElementById('alertTitle').textContent = title;
+            document.getElementById('alertMessage').textContent = message;
+            new bootstrap.Modal(document.getElementById('alertModal')).show();
+        }
+    </script>
+</body>
+</html>
