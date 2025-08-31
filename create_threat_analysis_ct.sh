@@ -441,7 +441,6 @@ function create_container() {
     fi
     
     msg_ok "Started LXC Container"
-}d LXC Container"
 }
 
 function install_application() {
