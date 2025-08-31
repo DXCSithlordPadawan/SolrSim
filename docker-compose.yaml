@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  threat-analysis:
+    build: .
+    container_name: threat-analysis-app
+    restart: unless-stopped
+    environment:
+      - PORT=5000
+      - DEBUG=false
+      - CONFIG_PATH=/app/config/areas.json
+      - DATA_PATH=/app/data/threats.json
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    volumes:
+      - threat-data:/app/data
+      - threat-config:/app/config
+    networks:
+      - traefik
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.threat-analysis.rule=Host(`threat.aip.dxc.com`)"
+      - "traefik.http.routers.threat-analysis.entrypoints=websecure"
+      - "traefik.http.routers.threat-analysis.tls=true"
+      - "traefik.http.routers.threat-analysis.tls.certresolver=dxc-cert-resolver"
+      - "traefik.http.services.threat-analysis.loadbalancer.server.port=5000"
+      - "traefik.http.routers.threat-analysis.middlewares=secure-headers@file"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--api.debug=true"
+      - "--log.level=INFO"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.dxc-cert-resolver.acme.caserver=https://cert-server.aip.dxc.com:8443/acme/acme/directory"
+      - "--certificatesresolvers.dxc-cert-resolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.dxc-cert-resolver.acme.email=admin@aip.dxc.com"
+      - "--certificatesresolvers.dxc-cert-resolver.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.dxc-cert-resolver.acme.preferredchain=ISRG Root X1"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-data:/letsencrypt
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.aip.dxc.com`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.tls.certresolver=dxc-cert-resolver"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=auth@file"
+
+volumes:
+  threat-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/threat-analysis/data
+  threat-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/threat-analysis/config
+  traefik-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/traefik/data
+
+networks:
+  traefik:
+    external: true
+  internal:
+    driver: bridge
