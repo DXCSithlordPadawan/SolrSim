@@ -1,3 +1,567 @@
+#!/usr/bin/env bash
+
+# Copyright (c) 2025 DXC AIP Community Scripts  
+# Author: DXC AIP Team
+# License: MIT
+# https://github.com/DXCSithlordPadawan/SolrSim/tree/main
+
+# Proxmox LXC Container Creation Script for Threat Analysis System
+# Fixed version to resolve container creation issues
+
+# Color codes
+RD='\033[01;31m'
+YW='\033[33m'
+GN='\033[1;92m'
+BL='\033[36m'
+DGN='\033[32m'
+BGN='\033[4;92m'
+CL='\033[m'
+BFR="\\r\\033[K"
+HOLD="-"
+CM="${GN}✓${CL}"
+CROSS="${RD}✗${CL}"
+
+# Initialize variables with defaults
+APP="Threat Analysis"
+CT_NAME="threat-analysis"
+DISK_SIZE="20"
+CORE_COUNT="2"
+RAM_SIZE="4096"
+BRG="vmbr0"
+NET="192.169.0.201/24"
+GATE="192.169.0.1"
+DISABLEIP6="no"
+SSH="no"
+VERB="no"
+CT_TYPE="1"
+CT_PW=""
+STORAGE="pve1"  # Default storage
+
+# Configuration file path
+CONFIG_FILE="/tmp/threat-analysis-install.conf"
+
+# Set safer bash options but allow commands to fail in some cases
+set -euo pipefail
+
+# Utility functions
+function header_info {
+clear
+cat <<"EOF"
+    _______ _                    _       _                _           _     
+   |__   __| |                  | |     | |              | |         (_)    
+      | |  | |__  _ __ ___  __ _| |_    / \   _ __   __ _| |_   _ ___ _ ___ 
+      | |  | '_ \| '__/ _ \/ _` | __|   / _ \ | '_ \ / _` | | | | / __| / __|
+      | |  | | | | | |  __/ (_| | |_   / ___ \| | | | (_| | | |_| \__ \ \__ \
+      |_|  |_| |_|_|  \___|\__,_|\__| /_/   \_\_| |_|\__,_|_|\__, |___/_|___/
+                                                              __/ |        
+                                                             |___/         
+
+               Proxmox Community Helper Scripts Style Installer
+EOF
+}
+
+function msg_info() {
+    local msg="$1"
+    echo -ne " ${HOLD} ${YW}${msg}..."
+}
+
+function msg_ok() {
+    local msg="$1"
+    echo -e "${BFR} ${CM} ${GN}${msg}${CL}"
+}
+
+function msg_error() {
+    local msg="$1"
+    echo -e "${BFR} ${CROSS} ${RD}${msg}${CL}"
+    exit 1
+}
+
+function PVE_CHECK() {
+    if ! command -v pveversion >/dev/null 2>&1; then
+        echo -e "${CROSS} This script requires Proxmox VE."
+        echo -e "Exiting..."
+        exit 1
+    fi
+}
+
+function ARCH_CHECK() {
+    if [ "$(dpkg --print-architecture)" != "amd64" ]; then
+        echo -e "${CROSS} This script requires amd64 architecture."
+        echo -e "Exiting..."
+        exit 1
+    fi
+}
+
+function exit_script() {
+    clear
+    echo -e "⚠  User exited script \n"
+    # Clean up config file if it exists
+    [ -f "$CONFIG_FILE" ] && rm -f "$CONFIG_FILE"
+    exit 0
+}
+
+function get_available_storage() {
+    # Get list of available storage with their types and status
+    pvesm status | awk 'NR>1 {printf "%-15s %-10s %-8s %s\n", $1, $2, $3, $4}' | while read name type status avail; do
+        if [[ "$status" == "active" && "$type" =~ ^(dir|lvm|lvm-thin|zfs|zfspool|btrfs)$ ]]; then
+            echo "$name"
+        fi
+    done | head -20  # Limit to first 20 storage options
+}
+
+function default_settings() {
+    NEXTID=$(pvesh get /cluster/nextid)
+    CT_ID="$NEXTID"
+    
+    echo -e "${BL}Using Default Settings${CL}"
+    echo -e "${DGN}Using CT Type ${BGN}Unprivileged${CL} ${RD}(Recommended)${CL}"
+    echo -e "${DGN}Using CT Password ${BGN}Automatic Login${CL}"
+    echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
+    echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
+    echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
+    echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
+    echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
+    echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
+    echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
+    echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
+    echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
+    echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
+    echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
+    echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
+    echo -e "${BL}Creating a ${APP} LXC using the above default settings${CL}"
+    
+    # Write config file with default settings
+    write_config_file
+}
+
+function advanced_settings() {
+    NEXTID=$(pvesh get /cluster/nextid)
+    
+    # Container Type
+    if command -v whiptail >/dev/null 2>&1; then
+        CT_TYPE=$(whiptail --title "CONTAINER TYPE" --radiolist "Choose Type" 10 58 2 \
+            "1" "Unprivileged" ON \
+            "0" "Privileged" OFF \
+            3>&1 1>&2 2>&3) || exit_script
+        echo -e "${DGN}Using CT Type ${BGN}$([ "$CT_TYPE" = "1" ] && echo "Unprivileged" || echo "Privileged")${CL}"
+    else
+        echo -e "${YW}Whiptail not available, using defaults${CL}"
+        CT_TYPE="1"
+    fi
+
+    # Container ID
+    if command -v whiptail >/dev/null 2>&1; then
+        CT_ID=$(whiptail --inputbox "Set Container ID" 8 58 $NEXTID --title "CONTAINER ID" 3>&1 1>&2 2>&3) || exit_script
+        echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
+    else
+        CT_ID="$NEXTID"
+        echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
+    fi
+
+    # Container Name
+    if command -v whiptail >/dev/null 2>&1; then
+        CT_NAME_INPUT=$(whiptail --inputbox "Set Container Hostname" 8 58 "$CT_NAME" --title "HOSTNAME" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$CT_NAME_INPUT" ]; then
+            CT_NAME="$CT_NAME_INPUT"
+        fi
+        echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
+    else
+        echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
+    fi
+
+    # Disk Size
+    if command -v whiptail >/dev/null 2>&1; then
+        DISK_SIZE_INPUT=$(whiptail --inputbox "Set Disk Size in GB" 8 58 "$DISK_SIZE" --title "DISK SIZE" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$DISK_SIZE_INPUT" =~ ^[0-9]+$ ]]; then
+            DISK_SIZE="$DISK_SIZE_INPUT"
+            echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
+        else
+            echo -e "${YW}Invalid disk size, using default: ${BGN}$DISK_SIZE GB${CL}"
+        fi
+    else
+        echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
+    fi
+
+    # CPU Cores
+    if command -v whiptail >/dev/null 2>&1; then
+        CORE_COUNT_INPUT=$(whiptail --inputbox "Allocate CPU Cores" 8 58 "$CORE_COUNT" --title "CORE COUNT" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$CORE_COUNT_INPUT" =~ ^[0-9]+$ ]] && [ "$CORE_COUNT_INPUT" -gt 0 ]; then
+            CORE_COUNT="$CORE_COUNT_INPUT"
+        fi
+        echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
+    else
+        echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
+    fi
+
+    # RAM Size
+    if command -v whiptail >/dev/null 2>&1; then
+        RAM_SIZE_INPUT=$(whiptail --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$RAM_SIZE_INPUT" =~ ^[0-9]+$ ]] && [ "$RAM_SIZE_INPUT" -gt 512 ]; then
+            RAM_SIZE="$RAM_SIZE_INPUT"
+        fi
+        echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
+    else
+        echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
+    fi
+
+    # Storage Selection
+    if command -v whiptail >/dev/null 2>&1; then
+        # Get available storage options
+        STORAGE_OPTIONS=""
+        STORAGE_COUNT=0
+        
+        # Create whiptail menu options
+        while IFS= read -r storage_name; do
+            if [ -n "$storage_name" ]; then
+                STORAGE_COUNT=$((STORAGE_COUNT + 1))
+                if [ "$storage_name" = "pve1" ] || [ "$storage_name" = "$STORAGE" ]; then
+                    STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" ON"
+                else
+                    STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" OFF"
+                fi
+            fi
+        done < <(get_available_storage)
+        
+        if [ $STORAGE_COUNT -gt 0 ]; then
+            # Show storage selection dialog
+            eval "STORAGE=\$(whiptail --title \"STORAGE SELECTION\" --radiolist \"Choose Storage for Container\" 15 70 10 $STORAGE_OPTIONS 3>&1 1>&2 2>&3)" || exit_script
+        else
+            # Fallback to detecting storage automatically
+            STORAGE=$(pvesm status | awk 'NR==2{print $1}')
+            if [ -z "$STORAGE" ]; then
+                STORAGE="local-lvm"
+            fi
+            echo -e "${YW}No suitable storage detected via whiptail, using: ${BGN}$STORAGE${CL}"
+        fi
+        echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
+    else
+        echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
+    fi
+
+    # Network Bridge
+    if command -v whiptail >/dev/null 2>&1; then
+        BRG_INPUT=$(whiptail --inputbox "Set Network Bridge" 8 58 "$BRG" --title "BRIDGE" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$BRG_INPUT" ]; then
+            BRG="$BRG_INPUT"
+        fi
+        echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
+    else
+        echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
+    fi
+
+    # IP Address
+    if command -v whiptail >/dev/null 2>&1; then
+        NET_INPUT=$(whiptail --inputbox "Set Static IPv4 CIDR Address" 8 58 "$NET" --title "IP ADDRESS" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$NET_INPUT" ]; then
+            NET="$NET_INPUT"
+        fi
+        echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
+    else
+        echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
+    fi
+
+    # Gateway
+    if command -v whiptail >/dev/null 2>&1; then
+        GATE_INPUT=$(whiptail --inputbox "Set Gateway IP" 8 58 "$GATE" --title "GATEWAY IP" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$GATE_INPUT" ]; then
+            GATE="$GATE_INPUT"
+        fi
+        echo -e "${DGN}Using Gateway IP Address ${BGN}$GATE${CL}"
+    else
+        echo -e "${DGN}Using Gateway IP Address ${BGN}$GATE${CL}"
+    fi
+
+    # IPv6 Setting
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --defaultno --title "IPv6" --yesno "Disable IPv6?" 10 58; then
+            DISABLEIP6="yes"
+        else
+            DISABLEIP6="no"
+        fi
+        echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
+    else
+        echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
+    fi
+
+    # SSH Access
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --defaultno --title "SSH ACCESS" --yesno "Enable Root SSH Access?" 10 58; then
+            SSH="yes"
+        else
+            SSH="no"
+        fi
+        echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
+    else
+        echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
+    fi
+
+    # Verbose Mode
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --defaultno --title "VERBOSE MODE" --yesno "Enable Verbose Mode?" 10 58; then
+            VERB="yes"
+        else
+            VERB="no"
+        fi
+        echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
+    else
+        echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
+    fi
+
+    # Final confirmation
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --title "CONTINUE" --yesno "Ready to create ${APP} LXC?" --no-button Continue --yes-button Exit 10 58; then
+            exit_script
+        fi
+    fi
+    
+    # Write config file with advanced settings
+    write_config_file
+}
+
+function write_config_file() {
+    msg_info "Writing Configuration File"
+    cat > "$CONFIG_FILE" << EOF
+# Threat Analysis System Installation Configuration
+# Generated on: $(date)
+# Proxmox Host: $(hostname)
+
+[CONTAINER_SETTINGS]
+CT_ID=$CT_ID
+CT_NAME=$CT_NAME
+CT_TYPE=$CT_TYPE
+DISK_SIZE=$DISK_SIZE
+CORE_COUNT=$CORE_COUNT
+RAM_SIZE=$RAM_SIZE
+STORAGE=$STORAGE
+
+[NETWORK_SETTINGS]
+BRG=$BRG
+NET=$NET
+GATE=$GATE
+DISABLEIP6=$DISABLEIP6
+
+[APPLICATION_SETTINGS]
+APP_NAME=$APP
+DOMAIN=threat.aip.dxc.com
+CERT_SERVER=192.168.0.22
+
+[MANAGEMENT_SETTINGS]
+SSH=$SSH
+VERBOSE=$VERB
+INSTALL_DATE=$(date)
+PROXMOX_VERSION=$(pveversion)
+
+[PATHS]
+CONFIG_PATH=/opt/threat-analysis/config/areas.json
+DATA_PATH=/opt/threat-analysis/data/threats.json
+DEPLOYMENT_PATH=/opt/deployment
+BACKUP_PATH=/opt/backups
+EOF
+    msg_ok "Configuration File Written: $CONFIG_FILE"
+}
+
+function install_script() {
+    ARCH_CHECK
+    PVE_CHECK
+    
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --title "${APP}" --yesno "This will create a New ${APP} LXC. Proceed?" 10 58; then
+            NEXTID=$(pvesh get /cluster/nextid)
+        else
+            exit_script
+        fi
+        
+        if whiptail --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced --yes-button Default 10 58; then
+            default_settings
+        else
+            advanced_settings
+        fi
+    else
+        echo -e "${YW}Interactive mode not available, using default settings${CL}"
+        default_settings
+    fi
+}
+
+# Container creation function
+function create_container() {
+    msg_info "Downloading LXC Template"
+    
+    # Check available templates and download if needed
+    TEMPLATE_STRING="local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+    
+    if ! pveam list local | grep -q "ubuntu-22.04-standard_22.04-1_amd64.tar.zst"; then
+        pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst
+    fi
+    msg_ok "Downloaded LXC Template"
+
+    msg_info "Creating LXC Container"
+    
+    # Verify storage exists
+    if ! pvesm status | grep -q "^$STORAGE "; then
+        echo -e "${YW}Warning: Storage '$STORAGE' not found, attempting to use default...${CL}"
+        STORAGE=$(pvesm status | awk 'NR==2{print $1}')
+        if [ -z "$STORAGE" ]; then
+            STORAGE="local-lvm"
+        fi
+        echo -e "${YW}Using storage: $STORAGE${CL}"
+    fi
+    
+    # Create container with specified storage
+    if ! pct create $CT_ID $TEMPLATE_STRING \
+        --arch $(dpkg --print-architecture) \
+        --cores $CORE_COUNT \
+        --hostname $CT_NAME \
+        --memory $RAM_SIZE \
+        --nameserver 8.8.8.8 \
+        --net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
+        --onboot 1 \
+        --ostype ubuntu \
+        --rootfs $STORAGE:$DISK_SIZE \
+        --searchdomain aip.dxc.com \
+        --startup order=3 \
+        --tags threat-analysis \
+        --timezone $(cat /etc/timezone) \
+        --unprivileged $CT_TYPE; then
+        msg_error "Failed to create LXC container"
+    fi
+
+    msg_ok "Created LXC Container"
+
+    msg_info "Starting LXC Container"
+    if ! pct start $CT_ID; then
+        msg_error "Failed to start container"
+    fi
+    
+    # Wait for container to be fully ready
+    sleep 15
+    
+    # Check if container is running
+    if ! pct status $CT_ID | grep -q "running"; then
+        msg_error "Container failed to start properly"
+    fi
+    
+    msg_ok "Started LXC Container"
+}d LXC Container"
+}
+
+function install_application() {
+    msg_info "Installing Dependencies"
+    
+    # Update and install basic packages
+    if ! pct exec $CT_ID -- bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get upgrade -y
+        apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release wget
+    "; then
+        msg_error "Failed to install basic dependencies"
+    fi
+    msg_ok "Installed Dependencies"
+
+    msg_info "Installing Docker"
+    if ! pct exec $CT_ID -- bash -c "
+        # Install Docker
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io
+        systemctl enable docker
+        systemctl start docker
+        
+        # Install Docker Compose
+        DOCKER_COMPOSE_VERSION=\$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'\"' -f4)
+        curl -L \"https://github.com/docker/compose/releases/download/\${DOCKER_COMPOSE_VERSION}/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
+        chmod +x /usr/local/bin/docker-compose
+    "; then
+        msg_error "Failed to install Docker"
+    fi
+    msg_ok "Installed Docker"
+
+    msg_info "Installing Additional Tools"
+    if ! pct exec $CT_ID -- bash -c "
+        # Install Tailscale
+        curl -fsSL https://tailscale.com/install.sh | sh
+        
+        # Create directories
+        mkdir -p /opt/threat-analysis/{data,config,logs}
+        mkdir -p /opt/traefik/{data,logs}
+        mkdir -p /opt/deployment/{traefik/dynamic,config,templates,static}
+        mkdir -p /opt/backups
+        
+        # Create Docker network
+        docker network create traefik || true
+        
+        # Install Python dependencies
+        apt-get install -y python3 python3-pip python3-venv
+    "; then
+        msg_error "Failed to install additional tools"
+    fi
+    msg_ok "Installed Additional Tools"
+
+    msg_info "Configuring Application"
+    # Create application files inside container
+    pct exec $CT_ID -- bash -c '
+# Create threat analysis application
+cat > /opt/deployment/threat_analysis_app.py << "APPEOF"
+#!/usr/bin/env python3
+"""
+Threat Analysis Web Application
+Modified to use external JSON configuration for valid areas
+"""
+
+import json
+import os
+from flask import Flask, render_template, request, jsonify
+from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
+
+threat_data = []
+valid_areas = []
+
+def load_config():
+    global valid_areas
+    config_path = os.environ.get("CONFIG_PATH", "./config/areas.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            valid_areas = config.get("valid_areas", [])
+            logger.info(f"Loaded {len(valid_areas)} valid areas")
+    except FileNotFoundError:
+        valid_areas = ["OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8"]
+        logger.info("Using default valid areas")
+
+def save_threat_data():
+    data_path = os.environ.get("DATA_PATH", "./data/threats.json")
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+    try:
+        with open(data_path, "w") as f:
+            json.dump(threat_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving threat data: {e}")
+
+def load_threat_data():
+    global threat_data
+    data_path = os.environ.get("DATA_PATH", "./data/threats.json")
+    try:
+        with open(data_path, "r") as f:
+            threat_data = json.load(f)
+    except FileNotFoundError:
+        threat_data = []
+
+@app.route("/")
+def index():
+    return render_template("index.html", valid_areas=valid_areas, threats=threat_data)
+
+@app.route("/api/threats", methods=["GET"])
+def get_threats():
+    return jsonify(threat_data)
+
 @app.route("/api/threats", methods=["POST"])
 def add_threat():
     try:
@@ -397,7 +961,6 @@ function show_completion_info() {
     echo -e "   💾 Disk Size: ${GN}${DISK_SIZE}GB${CL}"
     echo -e "   🧠 CPU Cores: ${GN}$CORE_COUNT${CL}"
     echo -e "   🐏 RAM: ${GN}${RAM_SIZE}MB${CL}"
-    echo -e "   💽 Storage: ${GN}$STORAGE${CL}"
 
     echo -e "\n${BL}🌐 Application Access:${CL}"
     echo -e "   🔗 Web Interface: ${GN}http://192.169.0.201${CL}"
@@ -428,7 +991,6 @@ function show_completion_info() {
     echo -e "   📂 App Config: ${GN}/opt/threat-analysis/config/areas.json${CL}"
     echo -e "   🐳 Docker Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
     echo -e "   📝 Python App: ${GN}/opt/deployment/threat_analysis_app.py${CL}"
-    echo -e "   ⚙️  Install Config: ${GN}$CONFIG_FILE${CL}"
 
     echo -e "\n${BL}🔍 Troubleshooting:${CL}"
     echo -e "   📋 Check Container: ${GN}pct status $CT_ID${CL}"
@@ -437,14 +999,7 @@ function show_completion_info() {
     echo -e "   📝 View Logs: ${GN}pct exec $CT_ID -- threat-analysis logs${CL}"
 
     echo -e "\n${GN}✅ Container is ready and application is running!${CL}"
-    echo -e "${YW}📝 Installation configuration saved to: $CONFIG_FILE${CL}"
     echo -e "${YW}📝 Configure Tailscale for secure external access if needed.${CL}\n"
-    
-    # Copy config file to container for future reference
-    if pct status $CT_ID | grep -q "running"; then
-        pct push $CT_ID "$CONFIG_FILE" "/opt/deployment/install.conf" || true
-        echo -e "${BL}📋 Installation config also saved inside container at: ${GN}/opt/deployment/install.conf${CL}\n"
-    fi
 }
 
 # Main execution
@@ -489,590 +1044,14 @@ case "${1:-main}" in
         echo "  - Health monitoring"
         echo "  - Management commands"
         echo "  - Tailscale ready"
-        echo "  - Storage selection (default: pve1)"
-        echo "  - Configuration file generation"
-        echo ""
-        echo "Storage Options:"
-        echo "  - Default mode: Uses pve1 storage"
-        echo "  - Advanced mode: Choose from available storage"
-        echo "  - Supported: dir, lvm, lvm-thin, zfs, zfspool, btrfs"
         echo ""
         echo "After installation:"
         echo "  - Access: http://192.169.0.201"
         echo "  - Management: pct enter <CT_ID>"
         echo "  - Commands: threat-analysis start|stop|status|logs"
-        echo "  - Config: /tmp/threat-analysis-install.conf"
         echo ""
         ;;
     *)
         main
         ;;
-esac#!/usr/bin/env bash
-
-# Copyright (c) 2025 DXC AIP Community Scripts  
-# Author: DXC AIP Team
-# License: MIT
-# https://github.com/DXCSithlordPadawan/SolrSim/tree/main
-
-# Proxmox LXC Container Creation Script for Threat Analysis System
-# Fixed syntax errors and improved storage selection
-
-# Color codes
-RD='\033[01;31m'
-YW='\033[33m'
-GN='\033[1;92m'
-BL='\033[36m'
-DGN='\033[32m'
-BGN='\033[4;92m'
-CL='\033[m'
-BFR="\\r\\033[K"
-HOLD="-"
-CM="${GN}✓${CL}"
-CROSS="${RD}✗${CL}"
-
-# Initialize variables with defaults
-APP="Threat Analysis"
-CT_NAME="threat-analysis"
-DISK_SIZE="20"
-CORE_COUNT="2"
-RAM_SIZE="4096"
-BRG="vmbr0"
-NET="192.169.0.201/24"
-GATE="192.169.0.1"
-DISABLEIP6="no"
-SSH="no"
-VERB="no"
-CT_TYPE="1"
-CT_PW=""
-STORAGE="pve1"  # Default storage
-
-# Configuration file path
-CONFIG_FILE="/tmp/threat-analysis-install.conf"
-
-# Set safer bash options
-set -euo pipefail
-
-# Utility functions
-function header_info {
-clear
-cat <<"EOF"
-    _______ _                    _       _                _           _     
-   |__   __| |                  | |     | |              | |         (_)    
-      | |  | |__  _ __ ___  __ _| |_    / \   _ __   __ _| |_   _ ___ _ ___ 
-      | |  | '_ \| '__/ _ \/ _` | __|   / _ \ | '_ \ / _` | | | | / __| / __|
-      | |  | | | | | |  __/ (_| | |_   / ___ \| | | | (_| | | |_| \__ \ \__ \
-      |_|  |_| |_|_|  \___|\__,_|\__| /_/   \_\_| |_|\__,_|_|\__, |___/_|___/
-                                                              __/ |        
-                                                             |___/         
-
-               Proxmox Community Helper Scripts Style Installer
-EOF
-}
-
-function msg_info() {
-    local msg="$1"
-    echo -ne " ${HOLD} ${YW}${msg}..."
-}
-
-function msg_ok() {
-    local msg="$1"
-    echo -e "${BFR} ${CM} ${GN}${msg}${CL}"
-}
-
-function msg_error() {
-    local msg="$1"
-    echo -e "${BFR} ${CROSS} ${RD}${msg}${CL}"
-    exit 1
-}
-
-function PVE_CHECK() {
-    if ! command -v pveversion >/dev/null 2>&1; then
-        echo -e "${CROSS} This script requires Proxmox VE."
-        echo -e "Exiting..."
-        exit 1
-    fi
-}
-
-function ARCH_CHECK() {
-    if [ "$(dpkg --print-architecture)" != "amd64" ]; then
-        echo -e "${CROSS} This script requires amd64 architecture."
-        echo -e "Exiting..."
-        exit 1
-    fi
-}
-
-function exit_script() {
-    clear
-    echo -e "⚠  User exited script \n"
-    # Clean up config file if it exists
-    [ -f "$CONFIG_FILE" ] && rm -f "$CONFIG_FILE"
-    exit 0
-}
-
-function write_config_file() {
-    msg_info "Writing Configuration File"
-    cat > "$CONFIG_FILE" << EOF
-# Threat Analysis System Installation Configuration
-# Generated on: $(date)
-# Proxmox Host: $(hostname)
-
-[CONTAINER_SETTINGS]
-CT_ID=$CT_ID
-CT_NAME=$CT_NAME
-CT_TYPE=$CT_TYPE
-DISK_SIZE=$DISK_SIZE
-CORE_COUNT=$CORE_COUNT
-RAM_SIZE=$RAM_SIZE
-STORAGE=$STORAGE
-
-[NETWORK_SETTINGS]
-BRG=$BRG
-NET=$NET
-GATE=$GATE
-DISABLEIP6=$DISABLEIP6
-
-[APPLICATION_SETTINGS]
-APP_NAME=$APP
-DOMAIN=threat.aip.dxc.com
-CERT_SERVER=192.168.0.22
-
-[MANAGEMENT_SETTINGS]
-SSH=$SSH
-VERBOSE=$VERB
-INSTALL_DATE=$(date)
-PROXMOX_VERSION=$(pveversion)
-
-[PATHS]
-CONFIG_PATH=/opt/threat-analysis/config/areas.json
-DATA_PATH=/opt/threat-analysis/data/threats.json
-DEPLOYMENT_PATH=/opt/deployment
-BACKUP_PATH=/opt/backups
-EOF
-    msg_ok "Configuration File Written: $CONFIG_FILE"
-}
-
-function get_available_storage() {
-    # Get list of available storage with their types and status
-    pvesm status | awk 'NR>1 && $3=="active" && ($2=="dir" || $2=="lvm" || $2=="lvm-thin" || $2=="zfs" || $2=="zfspool" || $2=="btrfs") {print $1}' | head -10
-}
-
-function default_settings() {
-    NEXTID=$(pvesh get /cluster/nextid)
-    CT_ID="$NEXTID"
-    
-    echo -e "${BL}Using Default Settings${CL}"
-    echo -e "${DGN}Using CT Type ${BGN}Unprivileged${CL} ${RD}(Recommended)${CL}"
-    echo -e "${DGN}Using CT Password ${BGN}Automatic Login${CL}"
-    echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
-    echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
-    echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
-    echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
-    echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
-    echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
-    echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
-    echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
-    echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
-    echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
-    echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
-    echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
-    echo -e "${BL}Creating a ${APP} LXC using the above default settings${CL}"
-    
-    # Write config file with default settings
-    write_config_file
-}
-
-function select_storage() {
-    local storage_list
-    local storage_array=()
-    local menu_options=""
-    local selected_storage
-    
-    # Get available storage
-    storage_list=$(get_available_storage)
-    
-    if [ -z "$storage_list" ]; then
-        echo -e "${YW}No suitable storage found, using default storage detection${CL}"
-        STORAGE=$(pvesm status | awk 'NR==2{print $1}')
-        if [ -z "$STORAGE" ]; then
-            STORAGE="local-lvm"
-        fi
-        return
-    fi
-    
-    # Convert to array and build menu
-    local count=0
-    while IFS= read -r storage_name; do
-        if [ -n "$storage_name" ]; then
-            storage_array+=("$storage_name")
-            if [ "$storage_name" = "pve1" ] || [ "$storage_name" = "$STORAGE" ]; then
-                menu_options="$menu_options $storage_name $storage_name ON"
-            else
-                menu_options="$menu_options $storage_name $storage_name OFF"
-            fi
-            count=$((count + 1))
-        fi
-    done <<< "$storage_list"
-    
-    if [ $count -eq 0 ]; then
-        echo -e "${YW}No storage options available, using default${CL}"
-        return
-    fi
-    
-    # Show storage selection dialog
-    if command -v whiptail >/dev/null 2>&1; then
-        selected_storage=$(whiptail --title "STORAGE SELECTION" \
-            --radiolist "Choose Storage for Container" 15 70 $count \
-            $menu_options \
-            3>&1 1>&2 2>&3) || exit_script
-        
-        if [ -n "$selected_storage" ]; then
-            STORAGE="$selected_storage"
-        fi
-    else
-        echo -e "${YW}Whiptail not available for storage selection${CL}"
-        # Use first available storage or pve1 if available
-        if echo "$storage_list" | grep -q "pve1"; then
-            STORAGE="pve1"
-        else
-            STORAGE=$(echo "$storage_list" | head -1)
-        fi
-    fi
-    
-    echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
-}
-
-function advanced_settings() {
-    NEXTID=$(pvesh get /cluster/nextid)
-    
-    # Container Type
-    if command -v whiptail >/dev/null 2>&1; then
-        CT_TYPE=$(whiptail --title "CONTAINER TYPE" --radiolist "Choose Type" 10 58 2 \
-            "1" "Unprivileged" ON \
-            "0" "Privileged" OFF \
-            3>&1 1>&2 2>&3) || exit_script
-        echo -e "${DGN}Using CT Type ${BGN}$([ "$CT_TYPE" = "1" ] && echo "Unprivileged" || echo "Privileged")${CL}"
-    else
-        echo -e "${YW}Whiptail not available, using defaults${CL}"
-        CT_TYPE="1"
-    fi
-
-    # Container ID
-    if command -v whiptail >/dev/null 2>&1; then
-        CT_ID=$(whiptail --inputbox "Set Container ID" 8 58 $NEXTID --title "CONTAINER ID" 3>&1 1>&2 2>&3) || exit_script
-        echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
-    else
-        CT_ID="$NEXTID"
-        echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
-    fi
-
-    # Container Name
-    if command -v whiptail >/dev/null 2>&1; then
-        CT_NAME_INPUT=$(whiptail --inputbox "Set Container Hostname" 8 58 "$CT_NAME" --title "HOSTNAME" 3>&1 1>&2 2>&3) || exit_script
-        if [ -n "$CT_NAME_INPUT" ]; then
-            CT_NAME="$CT_NAME_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
-
-    # Disk Size
-    if command -v whiptail >/dev/null 2>&1; then
-        DISK_SIZE_INPUT=$(whiptail --inputbox "Set Disk Size in GB" 8 58 "$DISK_SIZE" --title "DISK SIZE" 3>&1 1>&2 2>&3) || exit_script
-        if [[ "$DISK_SIZE_INPUT" =~ ^[0-9]+$ ]] && [ "$DISK_SIZE_INPUT" -gt 0 ]; then
-            DISK_SIZE="$DISK_SIZE_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
-
-    # CPU Cores
-    if command -v whiptail >/dev/null 2>&1; then
-        CORE_COUNT_INPUT=$(whiptail --inputbox "Allocate CPU Cores" 8 58 "$CORE_COUNT" --title "CORE COUNT" 3>&1 1>&2 2>&3) || exit_script
-        if [[ "$CORE_COUNT_INPUT" =~ ^[0-9]+$ ]] && [ "$CORE_COUNT_INPUT" -gt 0 ]; then
-            CORE_COUNT="$CORE_COUNT_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
-
-    # RAM Size
-    if command -v whiptail >/dev/null 2>&1; then
-        RAM_SIZE_INPUT=$(whiptail --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" 3>&1 1>&2 2>&3) || exit_script
-        if [[ "$RAM_SIZE_INPUT" =~ ^[0-9]+$ ]] && [ "$RAM_SIZE_INPUT" -ge 512 ]; then
-            RAM_SIZE="$RAM_SIZE_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
-
-    # Storage Selection
-    select_storage
-
-    # Network Bridge
-    if command -v whiptail >/dev/null 2>&1; then
-        BRG_INPUT=$(whiptail --inputbox "Set Network Bridge" 8 58 "$BRG" --title "BRIDGE" 3>&1 1>&2 2>&3) || exit_script
-        if [ -n "$BRG_INPUT" ]; then
-            BRG="$BRG_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
-
-    # IP Address
-    if command -v whiptail >/dev/null 2>&1; then
-        NET_INPUT=$(whiptail --inputbox "Set Static IPv4 CIDR Address" 8 58 "$NET" --title "IP ADDRESS" 3>&1 1>&2 2>&3) || exit_script
-        if [ -n "$NET_INPUT" ]; then
-            NET="$NET_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
-
-    # Gateway
-    if command -v whiptail >/dev/null 2>&1; then
-        GATE_INPUT=$(whiptail --inputbox "Set Gateway IP" 8 58 "$GATE" --title "GATEWAY IP" 3>&1 1>&2 2>&3) || exit_script
-        if [ -n "$GATE_INPUT" ]; then
-            GATE="$GATE_INPUT"
-        fi
-    fi
-    echo -e "${DGN}Using Gateway IP Address ${BGN}$GATE${CL}"
-
-    # IPv6 Setting
-    if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --defaultno --title "IPv6" --yesno "Disable IPv6?" 10 58; then
-            DISABLEIP6="yes"
-        else
-            DISABLEIP6="no"
-        fi
-    fi
-    echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
-
-    # SSH Access
-    if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --defaultno --title "SSH ACCESS" --yesno "Enable Root SSH Access?" 10 58; then
-            SSH="yes"
-        else
-            SSH="no"
-        fi
-    fi
-    echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
-
-    # Verbose Mode
-    if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --defaultno --title "VERBOSE MODE" --yesno "Enable Verbose Mode?" 10 58; then
-            VERB="yes"
-        else
-            VERB="no"
-        fi
-    fi
-    echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
-
-    # Final confirmation
-    if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --title "CONTINUE" --yesno "Ready to create ${APP} LXC?" --no-button Continue --yes-button Exit 10 58; then
-            exit_script
-        fi
-    fi
-    
-    # Write config file with advanced settings
-    write_config_file
-}
-
-function install_script() {
-    ARCH_CHECK
-    PVE_CHECK
-    
-    if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --title "${APP}" --yesno "This will create a New ${APP} LXC. Proceed?" 10 58; then
-            NEXTID=$(pvesh get /cluster/nextid)
-        else
-            exit_script
-        fi
-        
-        if whiptail --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced --yes-button Default 10 58; then
-            default_settings
-        else
-            advanced_settings
-        fi
-    else
-        echo -e "${YW}Interactive mode not available, using default settings${CL}"
-        default_settings
-    fi
-}
-
-# Container creation function
-function create_container() {
-    msg_info "Downloading LXC Template"
-    
-    # Check available templates and download if needed
-    TEMPLATE_STRING="local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
-    
-    if ! pveam list local | grep -q "ubuntu-22.04-standard_22.04-1_amd64.tar.zst"; then
-        pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst
-    fi
-    msg_ok "Downloaded LXC Template"
-
-    msg_info "Creating LXC Container"
-    
-    # Verify storage exists
-    if ! pvesm status | grep -q "^$STORAGE "; then
-        echo -e "${YW}Warning: Storage '$STORAGE' not found, attempting to use available storage...${CL}"
-        STORAGE=$(pvesm status | awk 'NR==2{print $1}')
-        if [ -z "$STORAGE" ]; then
-            STORAGE="local-lvm"
-        fi
-        echo -e "${YW}Using storage: $STORAGE${CL}"
-    fi
-    
-    # Create container with specified storage
-    if ! pct create $CT_ID $TEMPLATE_STRING \
-        --arch $(dpkg --print-architecture) \
-        --cores $CORE_COUNT \
-        --hostname $CT_NAME \
-        --memory $RAM_SIZE \
-        --nameserver 8.8.8.8 \
-        --net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
-        --onboot 1 \
-        --ostype ubuntu \
-        --rootfs $STORAGE:$DISK_SIZE \
-        --searchdomain aip.dxc.com \
-        --startup order=3 \
-        --tags threat-analysis \
-        --timezone $(cat /etc/timezone) \
-        --unprivileged $CT_TYPE; then
-        msg_error "Failed to create LXC container"
-    fi
-
-    msg_ok "Created LXC Container"
-
-    msg_info "Starting LXC Container"
-    if ! pct start $CT_ID; then
-        msg_error "Failed to start container"
-    fi
-    
-    # Wait for container to be fully ready
-    sleep 15
-    
-    # Check if container is running
-    if ! pct status $CT_ID | grep -q "running"; then
-        msg_error "Container failed to start properly"
-    fi
-    
-    msg_ok "Started LXC Container"
-}
-
-function install_application() {
-    msg_info "Installing Dependencies"
-    
-    # Update and install basic packages
-    if ! pct exec $CT_ID -- bash -c "
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update
-        apt-get upgrade -y
-        apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release wget
-    "; then
-        msg_error "Failed to install basic dependencies"
-    fi
-    msg_ok "Installed Dependencies"
-
-    msg_info "Installing Docker"
-    if ! pct exec $CT_ID -- bash -c "
-        # Install Docker
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list
-        apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io
-        systemctl enable docker
-        systemctl start docker
-        
-        # Install Docker Compose
-        DOCKER_COMPOSE_VERSION=\$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'\"' -f4)
-        curl -L \"https://github.com/docker/compose/releases/download/\${DOCKER_COMPOSE_VERSION}/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
-        chmod +x /usr/local/bin/docker-compose
-    "; then
-        msg_error "Failed to install Docker"
-    fi
-    msg_ok "Installed Docker"
-
-    msg_info "Installing Additional Tools"
-    if ! pct exec $CT_ID -- bash -c "
-        # Install Tailscale
-        curl -fsSL https://tailscale.com/install.sh | sh
-        
-        # Create directories
-        mkdir -p /opt/threat-analysis/{data,config,logs}
-        mkdir -p /opt/traefik/{data,logs}
-        mkdir -p /opt/deployment/{traefik/dynamic,config,templates,static}
-        mkdir -p /opt/backups
-        
-        # Create Docker network
-        docker network create traefik || true
-        
-        # Install Python dependencies
-        apt-get install -y python3 python3-pip python3-venv
-    "; then
-        msg_error "Failed to install additional tools"
-    fi
-    msg_ok "Installed Additional Tools"
-
-    msg_info "Configuring Application"
-    # Create application files inside container
-    pct exec $CT_ID -- bash -c '
-# Create threat analysis application
-cat > /opt/deployment/threat_analysis_app.py << "APPEOF"
-#!/usr/bin/env python3
-"""
-Threat Analysis Web Application
-Modified to use external JSON configuration for valid areas
-"""
-
-import json
-import os
-from flask import Flask, render_template, request, jsonify
-from datetime import datetime
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
-
-threat_data = []
-valid_areas = []
-
-def load_config():
-    global valid_areas
-    config_path = os.environ.get("CONFIG_PATH", "./config/areas.json")
-    try:
-        with open(config_path, "r") as f:
-            config = json.load(f)
-            valid_areas = config.get("valid_areas", [])
-            logger.info(f"Loaded {len(valid_areas)} valid areas")
-    except FileNotFoundError:
-        valid_areas = ["OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8"]
-        logger.info("Using default valid areas")
-
-def save_threat_data():
-    data_path = os.environ.get("DATA_PATH", "./data/threats.json")
-    os.makedirs(os.path.dirname(data_path), exist_ok=True)
-    try:
-        with open(data_path, "w") as f:
-            json.dump(threat_data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving threat data: {e}")
-
-def load_threat_data():
-    global threat_data
-    data_path = os.environ.get("DATA_PATH", "./data/threats.json")
-    try:
-        with open(data_path, "r") as f:
-            threat_data = json.load(f)
-    except FileNotFoundError:
-        threat_data = []
-
-@app.route("/")
-def index():
-    return render_template("index.html", valid_areas=valid_areas, threats=threat_data)
-
-@app.route("/api/threats", methods=["GET"])
-def get_threats():
-    return jsonify(threat_data)
-
-@app.route("/api/threats", methods=["POST"])
-def add_threat():
-    try
+esac
