@@ -28,8 +28,8 @@ DISK_SIZE="20"
 CORE_COUNT="2"
 RAM_SIZE="4096"
 BRG="vmbr0"
-NET="192.169.0.201/24"
-GATE="192.169.0.1"
+NET="192.168.0.201/24"
+GATE="192.168.0.1"
 DISABLEIP6="no"
 SSH="no"
 VERB="no"
@@ -412,7 +412,7 @@ function create_container() {
         --cores $CORE_COUNT \
         --hostname $CT_NAME \
         --memory $RAM_SIZE \
-        --nameserver 1.1.1.1 \
+        --nameserver 1.1.1.1,8.8.8.8,192.168.0.1 \
         --net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
         --onboot 1 \
         --ostype ubuntu \
