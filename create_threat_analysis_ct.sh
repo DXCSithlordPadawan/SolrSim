@@ -412,7 +412,7 @@ function create_container() {
         --cores $CORE_COUNT \
         --hostname $CT_NAME \
         --memory $RAM_SIZE \
-        --nameserver 8.8.8.8 \
+        --nameserver 1.1.1.1 \
         --net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
         --onboot 1 \
         --ostype ubuntu \
