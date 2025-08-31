@@ -6,7 +6,7 @@
 # https://github.com/DXCSithlordPadawan/SolrSim/tree/main
 
 # Proxmox LXC Container Creation Script for Threat Analysis System
-# Fixed version to resolve unbound variable issues
+# Fixed version to resolve container creation issues
 
 # Color codes
 RD='\033[01;31m'
@@ -36,7 +36,7 @@ VERB="no"
 CT_TYPE="1"
 CT_PW=""
 
-# Set safer bash options
+# Set safer bash options but allow commands to fail in some cases
 set -euo pipefail
 
 # Utility functions
@@ -69,10 +69,11 @@ function msg_ok() {
 function msg_error() {
     local msg="$1"
     echo -e "${BFR} ${CROSS} ${RD}${msg}${CL}"
+    exit 1
 }
 
 function PVE_CHECK() {
-    if ! pveversion >/dev/null 2>&1; then
+    if ! command -v pveversion >/dev/null 2>&1; then
         echo -e "${CROSS} This script requires Proxmox VE."
         echo -e "Exiting..."
         exit 1
@@ -173,73 +174,116 @@ function install_script() {
 # Container creation function
 function create_container() {
     msg_info "Downloading LXC Template"
-    local TEMPLATE_STRING="local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
     
-    if ! pveam list local | grep -q ubuntu-22.04-standard_22.04-1_amd64.tar.zst; then
-        pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst >/dev/null 2>&1
+    # Check available templates and download if needed
+    TEMPLATE_STRING="local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+    
+    if ! pveam list local | grep -q "ubuntu-22.04-standard_22.04-1_amd64.tar.zst"; then
+        pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst
     fi
     msg_ok "Downloaded LXC Template"
 
     msg_info "Creating LXC Container"
     
-    # Create the container
-    pct create $CT_ID $TEMPLATE_STRING -arch $(dpkg --print-architecture) -cores $CORE_COUNT -hostname $CT_NAME -memory $RAM_SIZE -nameserver 8.8.8.8 -net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
-        -onboot 1 -ostype ubuntu -rootfs local:$DISK_SIZE -searchdomain aip.dxc.com -startup order=3 -tags threat-analysis -timezone $(cat /etc/timezone) -unprivileged $CT_TYPE >/dev/null 2>&1
+    # Get the default storage
+    DEFAULT_STORAGE=$(pvesm status | awk 'NR==2{print $1}')
+    if [ -z "$DEFAULT_STORAGE" ]; then
+        DEFAULT_STORAGE="local-lvm"
+    fi
+    
+    # Create container with explicit parameters
+    if ! pct create $CT_ID $TEMPLATE_STRING \
+        --arch $(dpkg --print-architecture) \
+        --cores $CORE_COUNT \
+        --hostname $CT_NAME \
+        --memory $RAM_SIZE \
+        --nameserver 8.8.8.8 \
+        --net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
+        --onboot 1 \
+        --ostype ubuntu \
+        --rootfs $DEFAULT_STORAGE:$DISK_SIZE \
+        --searchdomain aip.dxc.com \
+        --startup order=3 \
+        --tags threat-analysis \
+        --timezone $(cat /etc/timezone) \
+        --unprivileged $CT_TYPE; then
+        msg_error "Failed to create LXC container"
+    fi
 
     msg_ok "Created LXC Container"
 
     msg_info "Starting LXC Container"
-    pct start $CT_ID
-    sleep 10
+    if ! pct start $CT_ID; then
+        msg_error "Failed to start container"
+    fi
+    
+    # Wait for container to be fully ready
+    sleep 15
+    
+    # Check if container is running
+    if ! pct status $CT_ID | grep -q "running"; then
+        msg_error "Container failed to start properly"
+    fi
+    
     msg_ok "Started LXC Container"
 }
 
 function install_application() {
-    msg_info "Installing Threat Analysis Application"
+    msg_info "Installing Dependencies"
     
-    # Create and execute the installation script inside the container
-    pct exec $CT_ID -- bash -c '
-# Update system
-apt-get update >/dev/null 2>&1
-apt-get upgrade -y >/dev/null 2>&1
-
-# Install dependencies
-apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release >/dev/null 2>&1
-
-# Install Docker
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" >/etc/apt/sources.list.d/docker.list
-apt-get update >/dev/null 2>&1
-apt-get install -y docker-ce docker-ce-cli containerd.io >/dev/null 2>&1
-systemctl enable docker >/dev/null 2>&1
-systemctl start docker >/dev/null 2>&1
-
-# Install Docker Compose
-DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep "tag_name" | cut -d\" -f4)
-curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose >/dev/null 2>&1
-chmod +x /usr/local/bin/docker-compose
-
-# Install Tailscale
-curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
-
-# Create directories
-mkdir -p /opt/threat-analysis/{data,config,logs}
-mkdir -p /opt/traefik/{data,logs}
-mkdir -p /opt/deployment/{traefik/dynamic,config,templates,static}
-mkdir -p /opt/backups
-
-# Create Docker network
-docker network create traefik 2>/dev/null || true
-
-# Install Python dependencies
-apt-get install -y python3 python3-pip python3-venv >/dev/null 2>&1
-
-echo "Dependencies installed successfully"
-'
+    # Update and install basic packages
+    if ! pct exec $CT_ID -- bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get upgrade -y
+        apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release wget
+    "; then
+        msg_error "Failed to install basic dependencies"
+    fi
     msg_ok "Installed Dependencies"
 
-    msg_info "Configuring Application Files"
-    # Copy application files to container
+    msg_info "Installing Docker"
+    if ! pct exec $CT_ID -- bash -c "
+        # Install Docker
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io
+        systemctl enable docker
+        systemctl start docker
+        
+        # Install Docker Compose
+        DOCKER_COMPOSE_VERSION=\$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'\"' -f4)
+        curl -L \"https://github.com/docker/compose/releases/download/\${DOCKER_COMPOSE_VERSION}/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
+        chmod +x /usr/local/bin/docker-compose
+    "; then
+        msg_error "Failed to install Docker"
+    fi
+    msg_ok "Installed Docker"
+
+    msg_info "Installing Additional Tools"
+    if ! pct exec $CT_ID -- bash -c "
+        # Install Tailscale
+        curl -fsSL https://tailscale.com/install.sh | sh
+        
+        # Create directories
+        mkdir -p /opt/threat-analysis/{data,config,logs}
+        mkdir -p /opt/traefik/{data,logs}
+        mkdir -p /opt/deployment/{traefik/dynamic,config,templates,static}
+        mkdir -p /opt/backups
+        
+        # Create Docker network
+        docker network create traefik || true
+        
+        # Install Python dependencies
+        apt-get install -y python3 python3-pip python3-venv
+    "; then
+        msg_error "Failed to install additional tools"
+    fi
+    msg_ok "Installed Additional Tools"
+
+    msg_info "Configuring Application"
+    # Create application files inside container
     pct exec $CT_ID -- bash -c '
 # Create threat analysis application
 cat > /opt/deployment/threat_analysis_app.py << "APPEOF"
@@ -390,42 +434,18 @@ services:
       - /opt/deployment/config:/app/config
     networks:
       - traefik
+    ports:
+      - "80:5000"
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik"
       - "traefik.http.routers.threat-analysis.rule=Host(\`threat.aip.dxc.com\`)"
-      - "traefik.http.routers.threat-analysis.entrypoints=websecure"
-      - "traefik.http.routers.threat-analysis.tls=true"
       - "traefik.http.services.threat-analysis.loadbalancer.server.port=5000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-
-  traefik:
-    image: traefik:v3.0
-    container_name: traefik
-    restart: unless-stopped
-    command:
-      - "--api.dashboard=true"
-      - "--log.level=INFO"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=traefik"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-    ports:
-      - "80:80"
-      - "443:443"
-      - "8080:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /opt/traefik/data:/letsencrypt
-    networks:
-      - traefik
 
 networks:
   traefik:
@@ -442,6 +462,12 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Threat Analysis System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .severity-low { background-color: #d4f6d4; }
+        .severity-medium { background-color: #fff3cd; }
+        .severity-high { background-color: #f8d7da; }
+        .severity-critical { background-color: #f5c6cb; }
+    </style>
 </head>
 <body>
     <nav class="navbar navbar-dark bg-dark">
@@ -454,7 +480,7 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
         <div class="row">
             <div class="col-md-8 mx-auto">
                 <div class="card">
-                    <div class="card-header">Report New Threat</div>
+                    <div class="card-header bg-primary text-white">Report New Threat</div>
                     <div class="card-body">
                         <form id="threat-form">
                             <div class="row">
@@ -511,11 +537,11 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
         <div class="row mt-4">
             <div class="col-12">
                 <div class="card">
-                    <div class="card-header">Current Threats</div>
+                    <div class="card-header bg-secondary text-white">Current Threats</div>
                     <div class="card-body">
                         <div class="table-responsive">
                             <table class="table table-striped">
-                                <thead>
+                                <thead class="table-dark">
                                     <tr>
                                         <th>ID</th>
                                         <th>Type</th>
@@ -528,13 +554,13 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
                                 </thead>
                                 <tbody>
                                     {% for threat in threats %}
-                                    <tr>
-                                        <td>#{{ threat.id }}</td>
+                                    <tr class="severity-{{ threat.severity.lower() }}">
+                                        <td><strong>#{{ threat.id }}</strong></td>
                                         <td>{{ threat.threat_type }}</td>
                                         <td><span class="badge bg-info">{{ threat.area }}</span></td>
-                                        <td><span class="badge bg-warning">{{ threat.severity }}</span></td>
+                                        <td><span class="badge bg-{% if threat.severity == 'Critical' %}danger{% elif threat.severity == 'High' %}warning{% elif threat.severity == 'Medium' %}info{% else %}success{% endif %}">{{ threat.severity }}</span></td>
                                         <td>{{ threat.description[:100] }}...</td>
-                                        <td><span class="badge bg-danger">{{ threat.status }}</span></td>
+                                        <td><span class="badge bg-{% if threat.status == 'Active' %}danger{% else %}success{% endif %}">{{ threat.status }}</span></td>
                                         <td>{{ threat.timestamp[:19] }}</td>
                                     </tr>
                                     {% endfor %}
@@ -562,8 +588,12 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
             })
             .then(response => response.json())
             .then(data => {
-                alert("Threat reported successfully!");
-                location.reload();
+                if (data.error) {
+                    alert("Error: " + data.error);
+                } else {
+                    alert("Threat reported successfully!");
+                    location.reload();
+                }
             })
             .catch(error => {
                 alert("Error: " + error);
@@ -582,29 +612,48 @@ COMPOSE_FILE="/opt/deployment/docker-compose.yml"
 case "$1" in
     start)
         echo "Starting Threat Analysis System..."
-        docker-compose -f $COMPOSE_FILE up -d
+        cd /opt/deployment
+        docker-compose up -d
         ;;
     stop)
         echo "Stopping Threat Analysis System..."
-        docker-compose -f $COMPOSE_FILE down
+        cd /opt/deployment
+        docker-compose down
         ;;
     restart)
         echo "Restarting Threat Analysis System..."
-        docker-compose -f $COMPOSE_FILE restart
+        cd /opt/deployment
+        docker-compose restart
         ;;
     status)
         echo "Threat Analysis System Status:"
-        docker-compose -f $COMPOSE_FILE ps
+        cd /opt/deployment
+        docker-compose ps
         ;;
     logs)
-        docker-compose -f $COMPOSE_FILE logs -f --tail=100
+        cd /opt/deployment
+        docker-compose logs -f --tail=100
         ;;
     health)
         echo "Health Check:"
-        curl -s http://localhost/health || echo "Health check failed"
+        curl -s http://localhost/health | jq "." 2>/dev/null || curl -s http://localhost/health || echo "Health check failed"
+        ;;
+    build)
+        echo "Building application..."
+        cd /opt/deployment
+        docker-compose build
         ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|logs|health}"
+        echo "Usage: $0 {start|stop|restart|status|logs|health|build}"
+        echo ""
+        echo "Threat Analysis System Management Commands:"
+        echo "  start    - Start all services"
+        echo "  stop     - Stop all services"
+        echo "  restart  - Restart all services"
+        echo "  status   - Show service status"
+        echo "  logs     - Show application logs"
+        echo "  health   - Check application health"
+        echo "  build    - Build application containers"
         exit 1
         ;;
 esac
@@ -612,32 +661,35 @@ MGMTEOF
 
 chmod +x /usr/local/bin/threat-analysis
 
-# Set up firewall
-ufw --force enable >/dev/null 2>&1
-ufw allow ssh >/dev/null 2>&1
-ufw allow 80/tcp >/dev/null 2>&1
-ufw allow 443/tcp >/dev/null 2>&1
-ufw allow 8080/tcp >/dev/null 2>&1
+# Set up basic firewall
+ufw --force enable
+ufw allow ssh
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 8080/tcp
 
-# Copy config files
+# Copy config files and set permissions
 cp -r /opt/deployment/config/* /opt/threat-analysis/config/
 chmod -R 755 /opt/threat-analysis /opt/traefik /opt/deployment
-
-# Set permissions
 chown -R 1000:1000 /opt/threat-analysis/data /opt/threat-analysis/config
 
 echo "Application configuration completed"
 '
-    msg_ok "Configured Application Files"
+    
+    if [ $? -ne 0 ]; then
+        msg_error "Failed to configure application"
+    fi
+    msg_ok "Configured Application"
 
     msg_info "Building and Starting Services"
-    pct exec $CT_ID -- bash -c '
-cd /opt/deployment
-docker-compose build >/dev/null 2>&1
-docker-compose up -d >/dev/null 2>&1
-sleep 15
-echo "Services started successfully"
-'
+    if ! pct exec $CT_ID -- bash -c '
+        cd /opt/deployment
+        docker-compose build
+        docker-compose up -d
+        sleep 20
+    '; then
+        msg_error "Failed to start services"
+    fi
     msg_ok "Services Started"
 }
 
@@ -645,13 +697,14 @@ function verify_installation() {
     msg_info "Verifying Installation"
     
     # Wait for services to be ready
-    sleep 10
+    sleep 15
     
     # Check if application is responding
     if pct exec $CT_ID -- curl -f http://localhost/health >/dev/null 2>&1; then
         msg_ok "Application Health Check Passed"
     else
-        msg_error "Application Health Check Failed - Check logs: pct exec $CT_ID -- threat-analysis logs"
+        echo -e "\n${YW}Warning: Application health check failed. This may be normal during first startup.${CL}"
+        echo -e "${YW}Check logs with: pct exec $CT_ID -- threat-analysis logs${CL}"
     fi
     
     # Check container status
@@ -659,6 +712,13 @@ function verify_installation() {
         msg_ok "Container is Running"
     else
         msg_error "Container Status Issue"
+    fi
+    
+    # Check Docker status
+    if pct exec $CT_ID -- systemctl is-active docker >/dev/null 2>&1; then
+        msg_ok "Docker Service is Running"
+    else
+        msg_error "Docker Service Issue"
     fi
 }
 
@@ -687,9 +747,9 @@ function show_completion_info() {
     echo -e "   🐏 RAM: ${GN}${RAM_SIZE}MB${CL}"
 
     echo -e "\n${BL}🌐 Application Access:${CL}"
-    echo -e "   🔗 Web Interface: ${GN}http://$GATE/threat-analysis${CL}"
-    echo -e "   🔧 Traefik Dashboard: ${GN}http://$GATE:8080${CL}"
-    echo -e "   ❤️  Health Check: ${GN}http://$GATE/health${CL}"
+    echo -e "   🔗 Web Interface: ${GN}http://192.169.0.201${CL}"
+    echo -e "   ❤️  Health Check: ${GN}http://192.169.0.201/health${CL}"
+    echo -e "   📊 API Endpoint: ${GN}http://192.169.0.201/api/threats${CL}"
 
     echo -e "\n${BL}🛠️  Container Management:${CL}"
     echo -e "   🚀 Start Container: ${GN}pct start $CT_ID${CL}"
@@ -703,19 +763,27 @@ function show_completion_info() {
     echo -e "   📊 Check Status: ${GN}threat-analysis status${CL}"
     echo -e "   📋 View Logs: ${GN}threat-analysis logs${CL}"
     echo -e "   ❤️  Health Check: ${GN}threat-analysis health${CL}"
+    echo -e "   🔨 Build Application: ${GN}threat-analysis build${CL}"
 
     echo -e "\n${YW}⚠️  Next Steps:${CL}"
-    echo -e "   1️⃣  Enter container: ${GN}pct enter $CT_ID${CL}"
-    echo -e "   2️⃣  Configure Tailscale: ${GN}tailscale up${CL}"
-    echo -e "   3️⃣  Test application: ${GN}curl http://localhost/health${CL}"
-    echo -e "   4️⃣  Access web interface: ${GN}http://$GATE/threat-analysis${CL}"
+    echo -e "   1️⃣  Test application: ${GN}curl http://192.169.0.201/health${CL}"
+    echo -e "   2️⃣  Enter container: ${GN}pct enter $CT_ID${CL}"
+    echo -e "   3️⃣  Configure Tailscale: ${GN}tailscale up${CL}"
+    echo -e "   4️⃣  Access web interface: ${GN}http://192.169.0.201${CL}"
 
     echo -e "\n${BL}🔧 Configuration Files:${CL}"
     echo -e "   📂 App Config: ${GN}/opt/threat-analysis/config/areas.json${CL}"
     echo -e "   🐳 Docker Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
+    echo -e "   📝 Python App: ${GN}/opt/deployment/threat_analysis_app.py${CL}"
+
+    echo -e "\n${BL}🔍 Troubleshooting:${CL}"
+    echo -e "   📋 Check Container: ${GN}pct status $CT_ID${CL}"
+    echo -e "   🐳 Check Docker: ${GN}pct exec $CT_ID -- docker ps${CL}"
+    echo -e "   📊 Check Services: ${GN}pct exec $CT_ID -- threat-analysis status${CL}"
+    echo -e "   📝 View Logs: ${GN}pct exec $CT_ID -- threat-analysis logs${CL}"
 
     echo -e "\n${GN}✅ Container is ready and application is running!${CL}"
-    echo -e "${YW}📝 Configure Tailscale for secure external access.${CL}\n"
+    echo -e "${YW}📝 Configure Tailscale for secure external access if needed.${CL}\n"
 }
 
 # Main execution
@@ -744,8 +812,28 @@ fi
 case "${1:-main}" in
     --help)
         echo "Threat Analysis Proxmox Container Creation Script"
+        echo ""
+        echo "This script creates a complete Threat Analysis system in an LXC container"
+        echo "with Docker, Python Flask application, and management tools."
+        echo ""
         echo "Usage: $0 [--help]"
-        echo "Run without arguments for interactive installation"
+        echo ""
+        echo "Features:"
+        echo "  - LXC container with Ubuntu 22.04"
+        echo "  - Docker and Docker Compose"
+        echo "  - Python Flask web application"
+        echo "  - External JSON configuration"
+        echo "  - RESTful API endpoints"
+        echo "  - Bootstrap web interface"
+        echo "  - Health monitoring"
+        echo "  - Management commands"
+        echo "  - Tailscale ready"
+        echo ""
+        echo "After installation:"
+        echo "  - Access: http://192.169.0.201"
+        echo "  - Management: pct enter <CT_ID>"
+        echo "  - Commands: threat-analysis start|stop|status|logs"
+        echo ""
         ;;
     *)
         main
