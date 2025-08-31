@@ -35,6 +35,10 @@ SSH="no"
 VERB="no"
 CT_TYPE="1"
 CT_PW=""
+STORAGE="pve1"  # Default storage
+
+# Configuration file path
+CONFIG_FILE="/tmp/threat-analysis-install.conf"
 
 # Set safer bash options but allow commands to fail in some cases
 set -euo pipefail
@@ -91,19 +95,23 @@ function ARCH_CHECK() {
 function exit_script() {
     clear
     echo -e "⚠  User exited script \n"
+    # Clean up config file if it exists
+    [ -f "$CONFIG_FILE" ] && rm -f "$CONFIG_FILE"
     exit 0
+}
+
+function get_available_storage() {
+    # Get list of available storage with their types and status
+    pvesm status | awk 'NR>1 {printf "%-15s %-10s %-8s %s\n", $1, $2, $3, $4}' | while read name type status avail; do
+        if [[ "$status" == "active" && "$type" =~ ^(dir|lvm|lvm-thin|zfs|zfspool|btrfs)$ ]]; then
+            echo "$name"
+        fi
+    done | head -20  # Limit to first 20 storage options
 }
 
 function default_settings() {
     NEXTID=$(pvesh get /cluster/nextid)
     CT_ID="$NEXTID"
-    
-    # Get available storage and set default
-    STORAGE_LIST=$(pvesm status | awk 'NR>1 {print $1}' | grep -E "(local-lvm|local-zfs|local)" | head -1)
-    if [ -z "$STORAGE_LIST" ]; then
-        STORAGE_LIST=$(pvesm status | awk 'NR>1 {print $1}' | head -1)
-    fi
-    DEFAULT_STORAGE="$STORAGE_LIST"
     
     echo -e "${BL}Using Default Settings${CL}"
     echo -e "${DGN}Using CT Type ${BGN}Unprivileged${CL} ${RD}(Recommended)${CL}"
@@ -113,14 +121,17 @@ function default_settings() {
     echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
     echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
     echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
+    echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
     echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
     echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
     echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
-    echo -e "${DGN}Using Storage ${BGN}$DEFAULT_STORAGE${CL}"
     echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
     echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
     echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
     echo -e "${BL}Creating a ${APP} LXC using the above default settings${CL}"
+    
+    # Write config file with default settings
+    write_config_file
 }
 
 function advanced_settings() {
@@ -149,7 +160,10 @@ function advanced_settings() {
 
     # Container Name
     if command -v whiptail >/dev/null 2>&1; then
-        CT_NAME=$(whiptail --inputbox "Set Container Name" 8 58 $CT_NAME --title "CONTAINER NAME" 3>&1 1>&2 2>&3) || exit_script
+        CT_NAME_INPUT=$(whiptail --inputbox "Set Container Hostname" 8 58 "$CT_NAME" --title "HOSTNAME" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$CT_NAME_INPUT" ]; then
+            CT_NAME="$CT_NAME_INPUT"
+        fi
         echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
     else
         echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
@@ -157,19 +171,23 @@ function advanced_settings() {
 
     # Disk Size
     if command -v whiptail >/dev/null 2>&1; then
-        DISK_SIZE=$(whiptail --inputbox "Set Disk Size (GB)" 8 58 $DISK_SIZE --title "DISK SIZE" 3>&1 1>&2 2>&3) || exit_script
-        if ! [[ $DISK_SIZE =~ ^[0-9]+$ ]]; then
-            echo -e "${RD}⚠ DISK SIZE MUST BE A NUMBER! Using default: 20GB${CL}"
-            DISK_SIZE="20"
+        DISK_SIZE_INPUT=$(whiptail --inputbox "Set Disk Size in GB" 8 58 "$DISK_SIZE" --title "DISK SIZE" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$DISK_SIZE_INPUT" =~ ^[0-9]+$ ]]; then
+            DISK_SIZE="$DISK_SIZE_INPUT"
+            echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
+        else
+            echo -e "${YW}Invalid disk size, using default: ${BGN}$DISK_SIZE GB${CL}"
         fi
-        echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
     else
         echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
     fi
 
     # CPU Cores
     if command -v whiptail >/dev/null 2>&1; then
-        CORE_COUNT=$(whiptail --inputbox "Set CPU Cores" 8 58 $CORE_COUNT --title "CPU CORES" 3>&1 1>&2 2>&3) || exit_script
+        CORE_COUNT_INPUT=$(whiptail --inputbox "Allocate CPU Cores" 8 58 "$CORE_COUNT" --title "CORE COUNT" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$CORE_COUNT_INPUT" =~ ^[0-9]+$ ]] && [ "$CORE_COUNT_INPUT" -gt 0 ]; then
+            CORE_COUNT="$CORE_COUNT_INPUT"
+        fi
         echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
     else
         echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
@@ -177,15 +195,55 @@ function advanced_settings() {
 
     # RAM Size
     if command -v whiptail >/dev/null 2>&1; then
-        RAM_SIZE=$(whiptail --inputbox "Set RAM (MB)" 8 58 $RAM_SIZE --title "RAM SIZE" 3>&1 1>&2 2>&3) || exit_script
+        RAM_SIZE_INPUT=$(whiptail --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$RAM_SIZE_INPUT" =~ ^[0-9]+$ ]] && [ "$RAM_SIZE_INPUT" -gt 512 ]; then
+            RAM_SIZE="$RAM_SIZE_INPUT"
+        fi
         echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
     else
         echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
     fi
 
+    # Storage Selection
+    if command -v whiptail >/dev/null 2>&1; then
+        # Get available storage options
+        STORAGE_OPTIONS=""
+        STORAGE_COUNT=0
+        
+        # Create whiptail menu options
+        while IFS= read -r storage_name; do
+            if [ -n "$storage_name" ]; then
+                STORAGE_COUNT=$((STORAGE_COUNT + 1))
+                if [ "$storage_name" = "pve1" ] || [ "$storage_name" = "$STORAGE" ]; then
+                    STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" ON"
+                else
+                    STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" OFF"
+                fi
+            fi
+        done < <(get_available_storage)
+        
+        if [ $STORAGE_COUNT -gt 0 ]; then
+            # Show storage selection dialog
+            eval "STORAGE=\$(whiptail --title \"STORAGE SELECTION\" --radiolist \"Choose Storage for Container\" 15 70 10 $STORAGE_OPTIONS 3>&1 1>&2 2>&3)" || exit_script
+        else
+            # Fallback to detecting storage automatically
+            STORAGE=$(pvesm status | awk 'NR==2{print $1}')
+            if [ -z "$STORAGE" ]; then
+                STORAGE="local-lvm"
+            fi
+            echo -e "${YW}No suitable storage detected via whiptail, using: ${BGN}$STORAGE${CL}"
+        fi
+        echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
+    else
+        echo -e "${DGN}Using Storage ${BGN}$STORAGE${CL}"
+    fi
+
     # Network Bridge
     if command -v whiptail >/dev/null 2>&1; then
-        BRG=$(whiptail --inputbox "Set Network Bridge" 8 58 $BRG --title "BRIDGE" 3>&1 1>&2 2>&3) || exit_script
+        BRG_INPUT=$(whiptail --inputbox "Set Network Bridge" 8 58 "$BRG" --title "BRIDGE" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$BRG_INPUT" ]; then
+            BRG="$BRG_INPUT"
+        fi
         echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
     else
         echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
@@ -193,7 +251,10 @@ function advanced_settings() {
 
     # IP Address
     if command -v whiptail >/dev/null 2>&1; then
-        NET=$(whiptail --inputbox "Set Static IP (CIDR format)" 8 58 $NET --title "IP ADDRESS" 3>&1 1>&2 2>&3) || exit_script
+        NET_INPUT=$(whiptail --inputbox "Set Static IPv4 CIDR Address" 8 58 "$NET" --title "IP ADDRESS" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$NET_INPUT" ]; then
+            NET="$NET_INPUT"
+        fi
         echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
     else
         echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
@@ -201,18 +262,30 @@ function advanced_settings() {
 
     # Gateway
     if command -v whiptail >/dev/null 2>&1; then
-        GATE=$(whiptail --inputbox "Set Gateway IP" 8 58 $GATE --title "GATEWAY" 3>&1 1>&2 2>&3) || exit_script
-        echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
+        GATE_INPUT=$(whiptail --inputbox "Set Gateway IP" 8 58 "$GATE" --title "GATEWAY IP" 3>&1 1>&2 2>&3) || exit_script
+        if [ -n "$GATE_INPUT" ]; then
+            GATE="$GATE_INPUT"
+        fi
+        echo -e "${DGN}Using Gateway IP Address ${BGN}$GATE${CL}"
     else
-        echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
+        echo -e "${DGN}Using Gateway IP Address ${BGN}$GATE${CL}"
     fi
 
-    # Storage Selection
-    select_storage
+    # IPv6 Setting
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --defaultno --title "IPv6" --yesno "Disable IPv6?" 10 58; then
+            DISABLEIP6="yes"
+        else
+            DISABLEIP6="no"
+        fi
+        echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
+    else
+        echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
+    fi
 
     # SSH Access
     if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --title "SSH ACCESS" --yesno "Enable Root SSH Access?" 10 58; then
+        if whiptail --defaultno --title "SSH ACCESS" --yesno "Enable Root SSH Access?" 10 58; then
             SSH="yes"
         else
             SSH="no"
@@ -221,118 +294,73 @@ function advanced_settings() {
     else
         echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
     fi
+
+    # Verbose Mode
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --defaultno --title "VERBOSE MODE" --yesno "Enable Verbose Mode?" 10 58; then
+            VERB="yes"
+        else
+            VERB="no"
+        fi
+        echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
+    else
+        echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
+    fi
+
+    # Final confirmation
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --title "CONTINUE" --yesno "Ready to create ${APP} LXC?" --no-button Continue --yes-button Exit 10 58; then
+            exit_script
+        fi
+    fi
+    
+    # Write config file with advanced settings
+    write_config_file
+}
+
+function write_config_file() {
+    msg_info "Writing Configuration File"
+    cat > "$CONFIG_FILE" << EOF
+# Threat Analysis System Installation Configuration
+# Generated on: $(date)
+# Proxmox Host: $(hostname)
+
+[CONTAINER_SETTINGS]
+CT_ID=$CT_ID
+CT_NAME=$CT_NAME
+CT_TYPE=$CT_TYPE
+DISK_SIZE=$DISK_SIZE
+CORE_COUNT=$CORE_COUNT
+RAM_SIZE=$RAM_SIZE
+STORAGE=$STORAGE
+
+[NETWORK_SETTINGS]
+BRG=$BRG
+NET=$NET
+GATE=$GATE
+DISABLEIP6=$DISABLEIP6
+
+[APPLICATION_SETTINGS]
+APP_NAME=$APP
+DOMAIN=threat.aip.dxc.com
+CERT_SERVER=192.168.0.22
+
+[MANAGEMENT_SETTINGS]
+SSH=$SSH
+VERBOSE=$VERB
+INSTALL_DATE=$(date)
+PROXMOX_VERSION=$(pveversion)
+
+[PATHS]
+CONFIG_PATH=/opt/threat-analysis/config/areas.json
+DATA_PATH=/opt/threat-analysis/data/threats.json
+DEPLOYMENT_PATH=/opt/deployment
+BACKUP_PATH=/opt/backups
+EOF
+    msg_ok "Configuration File Written: $CONFIG_FILE"
 }
 
 function install_script() {
-    ARCH_CHECK
-    PVE_CHECK
-    
-    if command -v whiptail >/dev/null 2>&1; then
-        if whiptail --title "${APP}" --yesno "This will create a New ${APP} LXC. Proceed?" 10 58; then
-            NEXTID=$(pvesh get /cluster/nextid)
-        else
-            exit_script
-        fi
-        
-        if whiptail --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced --yes-button Default 10 58; then
-            default_settings
-        else
-            advanced_settings
-        fi
-    else
-        echo -e "${YW}Interactive mode not available, using default settings${CL}"
-        default_settings
-    fi
-}
-    msg_info "Detecting Available Storage"
-    
-    # Get list of available storages that support containers
-    STORAGE_ARRAY=()
-    STORAGE_MENU=()
-    
-    while IFS= read -r line; do
-        storage=$(echo "$line" | awk '{print $1}')
-        type=$(echo "$line" | awk '{print $2}')
-        status=$(echo "$line" | awk '{print $3}')
-        
-        # Skip header and unavailable storages
-        if [[ "$storage" != "Name" && "$status" == "active" ]]; then
-            # Check if storage supports containers
-            if pvesm status -storage "$storage" | grep -q "content.*rootdir\|content.*vztmpl\|content.*images"; then
-                STORAGE_ARRAY+=("$storage")
-                STORAGE_MENU+=("$storage" "$type ($status)")
-            fi
-        fi
-    done < <(pvesm status)
-    
-    msg_ok "Detected ${#STORAGE_ARRAY[@]} Available Storages"
-    
-    if [ ${#STORAGE_ARRAY[@]} -eq 0 ]; then
-        msg_error "No suitable storage found for containers"
-    elif [ ${#STORAGE_ARRAY[@]} -eq 1 ]; then
-        DEFAULT_STORAGE="${STORAGE_ARRAY[0]}"
-        echo -e "${DGN}Using Storage ${BGN}$DEFAULT_STORAGE${CL} ${YW}(Only available storage)${CL}"
-    else
-        # Multiple storages available - let user choose
-        if command -v whiptail >/dev/null 2>&1; then
-            # Build whiptail menu
-            MENU_ITEMS=()
-            for i in "${!STORAGE_ARRAY[@]}"; do
-                storage="${STORAGE_ARRAY[$i]}"
-                type=$(pvesm status | grep "^$storage" | awk '{print $2}')
-                
-                # Mark first storage as default
-                if [ $i -eq 0 ]; then
-                    MENU_ITEMS+=("$storage" "$type" "ON")
-                else
-                    MENU_ITEMS+=("$storage" "$type" "OFF")
-                fi
-            done
-            
-            DEFAULT_STORAGE=$(whiptail --title "STORAGE SELECTION" \
-                --radiolist "Choose storage for container:" \
-                15 70 ${#STORAGE_ARRAY[@]} \
-                "${MENU_ITEMS[@]}" \
-                3>&1 1>&2 2>&3) || exit_script
-                
-            echo -e "${DGN}Using Storage ${BGN}$DEFAULT_STORAGE${CL}"
-        else
-            # No whiptail, show menu manually
-            echo -e "${BL}Available Storages:${CL}"
-            for i in "${!STORAGE_ARRAY[@]}"; do
-                storage="${STORAGE_ARRAY[$i]}"
-                type=$(pvesm status | grep "^$storage" | awk '{print $2}')
-                echo -e "  $((i+1))) ${GN}$storage${CL} ($type)"
-            done
-            
-            while true; do
-                echo -e "\n${YW}Select storage (1-${#STORAGE_ARRAY[@]}) or press Enter for default:${CL}"
-                read -r choice
-                
-                if [ -z "$choice" ]; then
-                    DEFAULT_STORAGE="${STORAGE_ARRAY[0]}"
-                    break
-                elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#STORAGE_ARRAY[@]}" ]; then
-                    DEFAULT_STORAGE="${STORAGE_ARRAY[$((choice-1))]}"
-                    break
-                else
-                    echo -e "${RD}Invalid choice. Please enter a number between 1 and ${#STORAGE_ARRAY[@]}${CL}"
-                fi
-            done
-            
-            echo -e "${DGN}Using Storage ${BGN}$DEFAULT_STORAGE${CL}"
-        fi
-    fi
-    
-    # Verify storage can handle the disk size
-    if command -v pvesm >/dev/null 2>&1; then
-        AVAILABLE_SPACE=$(pvesm status -storage "$DEFAULT_STORAGE" | awk 'NR==2 {print $4}' | sed 's/G//')
-        if [[ "$AVAILABLE_SPACE" =~ ^[0-9]+$ ]] && [ "$AVAILABLE_SPACE" -lt "$DISK_SIZE" ]; then
-            echo -e "${YW}Warning: Storage has ${AVAILABLE_SPACE}GB available, but ${DISK_SIZE}GB requested${CL}"
-            echo -e "${YW}Consider reducing disk size or choosing different storage${CL}"
-        fi
-    fi
-}
     ARCH_CHECK
     PVE_CHECK
     
@@ -368,12 +396,17 @@ function create_container() {
 
     msg_info "Creating LXC Container"
     
-    # Show storage information
-    echo -e "${BL}Storage Details:${CL}"
-    echo -e "   Storage: ${GN}$DEFAULT_STORAGE${CL}"
-    pvesm status -storage "$DEFAULT_STORAGE" 2>/dev/null | awk 'NR==2 {printf "   Type: %s | Status: %s | Available: %s\n", $2, $3, $4}' || true
+    # Verify storage exists
+    if ! pvesm status | grep -q "^$STORAGE "; then
+        echo -e "${YW}Warning: Storage '$STORAGE' not found, attempting to use default...${CL}"
+        STORAGE=$(pvesm status | awk 'NR==2{print $1}')
+        if [ -z "$STORAGE" ]; then
+            STORAGE="local-lvm"
+        fi
+        echo -e "${YW}Using storage: $STORAGE${CL}"
+    fi
     
-    # Create container with selected storage
+    # Create container with specified storage
     if ! pct create $CT_ID $TEMPLATE_STRING \
         --arch $(dpkg --print-architecture) \
         --cores $CORE_COUNT \
@@ -383,22 +416,12 @@ function create_container() {
         --net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
         --onboot 1 \
         --ostype ubuntu \
-        --rootfs $DEFAULT_STORAGE:$DISK_SIZE \
+        --rootfs $STORAGE:$DISK_SIZE \
         --searchdomain aip.dxc.com \
         --startup order=3 \
         --tags threat-analysis \
         --timezone $(cat /etc/timezone) \
         --unprivileged $CT_TYPE; then
-        
-        echo -e "\n${RD}Container creation failed. Possible causes:${CL}"
-        echo -e "  • Insufficient space on storage '$DEFAULT_STORAGE'"
-        echo -e "  • Container ID '$CT_ID' already exists"
-        echo -e "  • Network configuration issues"
-        echo -e "  • Storage '$DEFAULT_STORAGE' doesn't support containers"
-        echo -e "\n${YW}Troubleshooting:${CL}"
-        echo -e "  • Check storage: pvesm status -storage $DEFAULT_STORAGE"
-        echo -e "  • Check container ID: pct list | grep $CT_ID"
-        echo -e "  • Try different storage or container ID"
         msg_error "Failed to create LXC container"
     fi
 
@@ -406,23 +429,19 @@ function create_container() {
 
     msg_info "Starting LXC Container"
     if ! pct start $CT_ID; then
-        echo -e "\n${RD}Container start failed. Checking status...${CL}"
-        pct status $CT_ID || true
         msg_error "Failed to start container"
     fi
     
     # Wait for container to be fully ready
-    echo -e "${YW}Waiting for container to be ready...${CL}"
     sleep 15
     
     # Check if container is running
     if ! pct status $CT_ID | grep -q "running"; then
-        echo -e "\n${RD}Container status check:${CL}"
-        pct status $CT_ID || true
         msg_error "Container failed to start properly"
     fi
     
     msg_ok "Started LXC Container"
+}d LXC Container"
 }
 
 function install_application() {
@@ -972,7 +991,6 @@ function show_completion_info() {
     echo -e "   📂 App Config: ${GN}/opt/threat-analysis/config/areas.json${CL}"
     echo -e "   🐳 Docker Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
     echo -e "   📝 Python App: ${GN}/opt/deployment/threat_analysis_app.py${CL}"
-    echo -e "   💿 Storage Used: ${GN}$DEFAULT_STORAGE${CL}"
 
     echo -e "\n${BL}🔍 Troubleshooting:${CL}"
     echo -e "   📋 Check Container: ${GN}pct status $CT_ID${CL}"
