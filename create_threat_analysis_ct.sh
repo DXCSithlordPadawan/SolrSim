@@ -183,21 +183,8 @@ function create_container() {
     msg_info "Creating LXC Container"
     
     # Create the container
-    pct create $CT_ID $TEMPLATE_STRING \
-        -arch $(dpkg --print-architecture) \
-        -cores $CORE_COUNT \
-        -hostname $CT_NAME \
-        -memory $RAM_SIZE \
-        -nameserver 8.8.8.8 \
-        -net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
-        -onboot 1 \
-        -ostype ubuntu \
-        -rootfs local:$DISK_SIZE \
-        -searchdomain aip.dxc.com \
-        -startup order=3 \
-        -tags threat-analysis \
-        -timezone $(cat /etc/timezone) \
-        -unprivileged $CT_TYPE >/dev/null 2>&1
+    pct create $CT_ID $TEMPLATE_STRING -arch $(dpkg --print-architecture) -cores $CORE_COUNT -hostname $CT_NAME -memory $RAM_SIZE -nameserver 8.8.8.8 -net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
+        -onboot 1 -ostype ubuntu -rootfs local:$DISK_SIZE -searchdomain aip.dxc.com -startup order=3 -tags threat-analysis -timezone $(cat /etc/timezone) -unprivileged $CT_TYPE >/dev/null 2>&1
 
     msg_ok "Created LXC Container"
 
