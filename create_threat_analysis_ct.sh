@@ -6,28 +6,38 @@
 # https://github.com/DXCSithlordPadawan/SolrSim/tree/main
 
 # Proxmox LXC Container Creation Script for Threat Analysis System
-# This script creates and configures a Proxmox LXC container specifically for the Threat Analysis application
+# Fixed version to resolve unbound variable issues
 
 # Color codes
 RD='\033[01;31m'
 YW='\033[33m'
 GN='\033[1;92m'
+BL='\033[36m'
+DGN='\033[32m'
+BGN='\033[4;92m'
 CL='\033[m'
 BFR="\\r\\033[K"
 HOLD="-"
 CM="${GN}✓${CL}"
 CROSS="${RD}✗${CL}"
 
-# Set error handling
-set -Eeuo pipefail
-trap cleanup SIGINT SIGTERM ERR EXIT
+# Initialize variables with defaults
+APP="Threat Analysis"
+CT_NAME="threat-analysis"
+DISK_SIZE="20"
+CORE_COUNT="2"
+RAM_SIZE="4096"
+BRG="vmbr0"
+NET="192.169.0.201/24"
+GATE="192.169.0.1"
+DISABLEIP6="no"
+SSH="no"
+VERB="no"
+CT_TYPE="1"
+CT_PW=""
 
-cleanup() {
-    trap - SIGINT SIGTERM ERR EXIT
-    if [[ ${1-} =~ ^[0-9]+$ ]]; then
-        exit $1
-    fi
-}
+# Set safer bash options
+set -euo pipefail
 
 # Utility functions
 function header_info {
@@ -42,6 +52,7 @@ cat <<"EOF"
                                                               __/ |        
                                                              |___/         
 
+               Proxmox Community Helper Scripts Style Installer
 EOF
 }
 
@@ -61,8 +72,8 @@ function msg_error() {
 }
 
 function PVE_CHECK() {
-    if [ $(pveversion | grep -c "pve-manager/7\|pve-manager/8") -ne 1 ]; then
-        echo -e "${CROSS} This script requires Proxmox VE 7.0 or later."
+    if ! pveversion >/dev/null 2>&1; then
+        echo -e "${CROSS} This script requires Proxmox VE."
         echo -e "Exiting..."
         exit 1
     fi
@@ -70,640 +81,686 @@ function PVE_CHECK() {
 
 function ARCH_CHECK() {
     if [ "$(dpkg --print-architecture)" != "amd64" ]; then
-        echo -e "${CROSS} This script will not work with PiMOS! \n"
+        echo -e "${CROSS} This script requires amd64 architecture."
         echo -e "Exiting..."
         exit 1
     fi
 }
 
-function default_settings() {
-    CT_TYPE="1"
-    PW=""
-    CT_ID="$NEXTID"
-    CT_NAME="threat-analysis"
-    DISK_SIZE="20"
-    CORE_COUNT="2"
-    RAM_SIZE="4096"
-    BRG="vmbr0"
-    NET="dhcp"
-    GATE=""
-    APT_CACHER=""
-    APT_CACHER_IP=""
-    DISABLEIP6="no"
-    MTU=""
-    SD=""
-    NS=""
-    MAC=""
-    VLAN=""
-    SSH="no"
-    VERB="no"
-    echo_default
+function exit_script() {
+    clear
+    echo -e "⚠  User exited script \n"
+    exit 0
 }
 
-function echo_default() {
+function default_settings() {
+    NEXTID=$(pvesh get /cluster/nextid)
+    CT_ID="$NEXTID"
+    
     echo -e "${BL}Using Default Settings${CL}"
-    echo -e "${DGN}Using CT Type ${BGN}Unprivileged${CL} ${RD}NO DEVICE PASSTHROUGH${CL}"
+    echo -e "${DGN}Using CT Type ${BGN}Unprivileged${CL} ${RD}(Recommended)${CL}"
     echo -e "${DGN}Using CT Password ${BGN}Automatic Login${CL}"
-    echo -e "${DGN}Using CT ID ${BGN}$NEXTID${CL}"
+    echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
     echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
     echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
     echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
     echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
     echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
-    echo -e "${DGN}Using Static IP Address ${BGN}192.169.0.201/24${CL}"
-    echo -e "${DGN}Using Gateway ${BGN}192.169.0.1${CL}"
+    echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
+    echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
     echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
-    echo -e "${DGN}Using Interface MTU Size ${BGN}Default${CL}"
-    echo -e "${DGN}Using DNS Search Domain ${BGN}Host${CL}"
-    echo -e "${DGN}Using DNS Server Address ${BGN}Host${CL}"
-    echo -e "${DGN}Using MAC Address ${BGN}Default${CL}"
-    echo -e "${DGN}Using VLAN Tag ${BGN}Default${CL}"
     echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
     echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
     echo -e "${BL}Creating a ${APP} LXC using the above default settings${CL}"
 }
 
-function exit-script() {
-    clear
-    echo -e "⚠  User exited script \n"
-    exit
-}
-
 function advanced_settings() {
-    CT_TYPE=$(whiptail --title "CONTAINER TYPE" --radiolist "Choose Type" 10 58 2 \
-        "1" "Unprivileged" ON \
-        "0" "Privileged" OFF \
-        3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        echo -e "${DGN}Using CT Type ${BGN}$CT_TYPE${CL}"
+    NEXTID=$(pvesh get /cluster/nextid)
+    
+    # Container Type
+    if command -v whiptail >/dev/null 2>&1; then
+        CT_TYPE=$(whiptail --title "CONTAINER TYPE" --radiolist "Choose Type" 10 58 2 \
+            "1" "Unprivileged" ON \
+            "0" "Privileged" OFF \
+            3>&1 1>&2 2>&3) || exit_script
+        echo -e "${DGN}Using CT Type ${BGN}$([ "$CT_TYPE" = "1" ] && echo "Unprivileged" || echo "Privileged")${CL}"
     else
-        exit-script
+        echo -e "${YW}Whiptail not available, using defaults${CL}"
+        CT_TYPE="1"
     fi
 
-    CT_PW1=$(whiptail --inputbox "Set Root Password (needed for root ssh access)" 8 58 --title "PASSWORD(leave blank for automatic login)" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z "$CT_PW1" ]; then
-            CT_PW1="Automatic Login" 
-            CT_PW=" "
-        else
-            CT_PW="-password $CT_PW1"
-        fi
-        echo -e "${DGN}Using CT Password ${BGN}$CT_PW1${CL}"
-    else
-        exit-script
-    fi
-
-    CT_ID=$(whiptail --inputbox "Set Container ID" 8 58 $NEXTID --title "CONTAINER ID" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
+    # Container ID
+    if command -v whiptail >/dev/null 2>&1; then
+        CT_ID=$(whiptail --inputbox "Set Container ID" 8 58 $NEXTID --title "CONTAINER ID" 3>&1 1>&2 2>&3) || exit_script
         echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
     else
-        exit-script
+        CT_ID="$NEXTID"
+        echo -e "${DGN}Using CT ID ${BGN}$CT_ID${CL}"
     fi
 
-    CT_NAME=$(whiptail --inputbox "Set Hostname" 8 58 $CT_NAME --title "HOSTNAME" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
-    else
-        exit-script
-    fi
-
-    DISK_SIZE=$(whiptail --inputbox "Set Disk Size in GB" 8 58 $DISK_SIZE --title "DISK SIZE" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if ! [[ $DISK_SIZE =~ ^[0-9]+$ ]]; then
-            echo -e "${RD}⚠ DISK SIZE MUST BE A INTEGER NUMBER!${CL}"
-            advanced_settings
-        fi
-        echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
-    else
-        exit-script
-    fi
-
-    CORE_COUNT=$(whiptail --inputbox "Allocate CPU Cores" 8 58 $CORE_COUNT --title "CORE COUNT" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
-    else
-        exit-script
-    fi
-
-    RAM_SIZE=$(whiptail --inputbox "Allocate RAM in MiB" 8 58 $RAM_SIZE --title "RAM" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
-    else
-        exit-script
-    fi
-
-    BRG=$(whiptail --inputbox "Set a Bridge" 8 58 vmbr0 --title "BRIDGE" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
-    else
-        exit-script
-    fi
-
-    NET=$(whiptail --inputbox "Set a Static IPv4 CIDR Address(/24)" 8 58 192.169.0.201/24 --title "IP ADDRESS" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
-    else
-        exit-script
-    fi
-
-    GATE1=$(whiptail --inputbox "Set a Gateway IP (mandatory if Static IP was used)" 8 58 192.169.0.1 --title "GATEWAY IP" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z $GATE1 ]; then
-            GATE1="Default" GATE=""
-        else
-            GATE=",gw=$GATE1"
-        fi
-        echo -e "${DGN}Using Gateway IP Address ${BGN}$GATE1${CL}"
-    else
-        exit-script
-    fi
-
-    if (whiptail --defaultno --title "IPv6" --yesno "Disable IPv6?" 10 58); then
-        DISABLEIP6="yes"
-    else
-        DISABLEIP6="no"
-    fi
-    echo -e "${DGN}Disable IPv6 ${BGN}$DISABLEIP6${CL}"
-
-    MTU1=$(whiptail --inputbox "Set Interface MTU Size (leave blank for default)" 8 58 --title "MTU SIZE" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z $MTU1 ]; then
-            MTU1="Default" MTU=""
-        else
-            MTU=",mtu=$MTU1"
-        fi
-        echo -e "${DGN}Using Interface MTU Size ${BGN}$MTU1${CL}"
-    else
-        exit-script
-    fi
-
-    SD=$(whiptail --inputbox "Set a DNS Search Domain (leave blank for HOST)" 8 58 --title "DNS Search Domain" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z $SD ]; then
-            SX=Host
-        else
-            SX=$SD
-        fi
-        echo -e "${DGN}Using DNS Search Domain ${BGN}$SX${CL}"
-    else
-        exit-script
-    fi
-
-    NS=$(whiptail --inputbox "Set a DNS Server IP (leave blank for HOST)" 8 58 --title "DNS SERVER IP" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z $NS ]; then
-            NX=Host
-        else
-            NX=$NS
-        fi
-        echo -e "${DGN}Using DNS Server IP Address ${BGN}$NX${CL}"
-    else
-        exit-script
-    fi
-
-    MAC1=$(whiptail --inputbox "Set a MAC Address(leave blank for default)" 8 58 --title "MAC ADDRESS" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z $MAC1 ]; then
-            MAC1="Default" MAC=""
-        else
-            MAC=",hwaddr=$MAC1"
-            echo -e "${DGN}Using MAC Address ${BGN}$MAC1${CL}"
-        fi
-    else
-        exit-script
-    fi
-
-    VLAN1=$(whiptail --inputbox "Set a Vlan(leave blank for default)" 8 58 --title "VLAN" 3>&1 1>&2 2>&3)
-    exitstatus=$?
-    if [ $exitstatus = 0 ]; then
-        if [ -z $VLAN1 ]; then
-            VLAN1="Default" VLAN=""
-        else
-            VLAN=",tag=$VLAN1"
-        fi
-        echo -e "${DGN}Using Vlan Tag ${BGN}$VLAN1${CL}"
-    else
-        exit-script
-    fi
-
-    if (whiptail --defaultno --title "SSH ACCESS" --yesno "Enable Root SSH Access?" 10 58); then
-        SSH="yes"
-    else
-        SSH="no"
-    fi
-    echo -e "${DGN}Enable Root SSH Access ${BGN}$SSH${CL}"
-
-    if (whiptail --defaultno --title "VERBOSE MODE" --yesno "Enable Verbose Mode?" 10 58); then
-        VERB="yes"
-    else
-        VERB="no"
-    fi
-    echo -e "${DGN}Enable Verbose Mode ${BGN}$VERB${CL}"
-
-    if (whiptail --title "CONTINUE" --yesno "Ready to create ${APP} LXC?" --no-button Continue --yes-button Exit 10 58); then
-        exit-script
-    fi
+    # Other settings with defaults
+    echo -e "${DGN}Using CT Name ${BGN}$CT_NAME${CL}"
+    echo -e "${DGN}Using Disk Size ${BGN}$DISK_SIZE GB${CL}"
+    echo -e "${DGN}Using ${BGN}$CORE_COUNT${CL}${DGN} vCPU(s)${CL}"
+    echo -e "${DGN}Using ${BGN}$RAM_SIZE${CL}${DGN}MiB RAM${CL}"
+    echo -e "${DGN}Using Bridge ${BGN}$BRG${CL}"
+    echo -e "${DGN}Using Static IP Address ${BGN}$NET${CL}"
+    echo -e "${DGN}Using Gateway ${BGN}$GATE${CL}"
 }
 
 function install_script() {
     ARCH_CHECK
     PVE_CHECK
-    if (whiptail --title "${APP}" --yesno "This will create a New ${APP} LXC. Proceed?" 10 58); then
-        NEXTID=$(pvesh get /cluster/nextid)
+    
+    if command -v whiptail >/dev/null 2>&1; then
+        if whiptail --title "${APP}" --yesno "This will create a New ${APP} LXC. Proceed?" 10 58; then
+            NEXTID=$(pvesh get /cluster/nextid)
+        else
+            exit_script
+        fi
+        
+        if whiptail --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced --yes-button Default 10 58; then
+            default_settings
+        else
+            advanced_settings
+        fi
     else
-        clear
-        echo -e "⚠  User exited script \n"
-        exit
-    fi
-    if (whiptail --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced --yes-button Default 10 58); then
+        echo -e "${YW}Interactive mode not available, using default settings${CL}"
         default_settings
-    else
-        advanced_settings
     fi
 }
 
-function update_script() {
-    header_info
-    msg_info "Updating ${APP} LXC"
-    apt-get update &>/dev/null
-    apt-get -y upgrade &>/dev/null
-    msg_ok "Updated ${APP} LXC"
-    exit
-}
-
-# Variables
-APP="Threat Analysis"
-var_disk="20"
-var_cpu="2"
-var_ram="4096"
-var_os="ubuntu"
-var_version="22.04"
-NSAPP=$(echo ${APP,,} | tr -d ' ')
-var_install="${NSAPP}-install"
-timezone=$(cat /etc/timezone)
-INTEGER='^[0-9]+([.][0-9]+)?$'
-
-# Color variables
-CL=`echo "\033[m"`
-RD=`echo "\033[01;31m"`
-BL=`echo "\033[36m"`
-GN=`echo "\033[1;92m"`
-YW=`echo "\033[33m"`
-DGN=`echo "\033[32m"`
-BGN=`echo "\033[4;92m"`
-
-# Main script execution
-header_info
-
-# Check if this is an update
-if [[ "$1" == "update" ]]; then
-    update_script
-fi
-
-# Install script
-install_script
-
-# Start the LXC creation process
-start_routines() {
-    local VMID="$CT_ID"
-    local VMNAME="$CT_NAME"
-    local DISK_SIZE="$DISK_SIZE"
-    local CORE_COUNT="$CORE_COUNT"
-    local RAM_SIZE="$RAM_SIZE"
-    local BRG="$BRG"
-    local NET="$NET"
-    local GATE="$GATE"
-    local APT_CACHER="$APT_CACHER"
-    local APT_CACHER_IP="$APT_CACHER_IP"
-    local DISABLEIP6="$DISABLEIP6"
-    local MTU="$MTU"
-    local SD="$SD"
-    local NS="$NS"
-    local MAC="$MAC"
-    local VLAN="$VLAN"
-    local SSH="$SSH"
-    local VERB="$VERB"
-    
+# Container creation function
+function create_container() {
     msg_info "Downloading LXC Template"
-    local OSTYPE=linux
-    local OSVERSION=${var_version}
-    local TEMPLATE_STRING="local:vztmpl/ubuntu-${OSVERSION}-standard_${OSVERSION}-1_amd64.tar.zst"
+    local TEMPLATE_STRING="local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
     
-    if ! pveam list local | grep -q ubuntu-${OSVERSION}-standard_${OSVERSION}-1_amd64.tar.zst; then
-        pveam download local ubuntu-${OSVERSION}-standard_${OSVERSION}-1_amd64.tar.zst >/dev/null 2>&1
+    if ! pveam list local | grep -q ubuntu-22.04-standard_22.04-1_amd64.tar.zst; then
+        pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst >/dev/null 2>&1
     fi
     msg_ok "Downloaded LXC Template"
 
     msg_info "Creating LXC Container"
-    STORAGE_TYPE=$(pvesm status -storage $(pvesm status | awk 'NR>1 {print $1}' | head -1) | awk 'NR>1 {print $2}')
-    case $STORAGE_TYPE in
-        nfs|cifs)
-            DISK_EXT=".raw"
-            DISK_REF="$VMID/"
-            ;;
-        dir)
-            DISK_EXT=".raw"
-            DISK_REF="$VMID/"
-            ;;
-        zfspool)
-            DISK_EXT=""
-            DISK_REF="subvol-$VMID-disk-0"
-            ;;
-        btrfs)
-            DISK_EXT=".raw"
-            DISK_REF="$VMID/"
-            ;;
-        *)
-            DISK_EXT=""
-            DISK_REF="vm-$VMID-disk-0"
-            ;;
-    esac
     
-    DISK_IMPORT="-rootfs $(pvesm status | awk 'NR>1 {print $1}' | head -1):${DISK_SIZE}$DISK_EXT"
-    
-    pvesm alloc $(pvesm status | awk 'NR>1 {print $1}' | head -1) $VMID $DISK_REF ${DISK_SIZE}G >/dev/null
-    if [ "$VERB" == "yes" ]; then set -x; fi
-    
-    # Create the container with specific network configuration for 192.169.0.201
-    pct create $VMID $TEMPLATE_STRING $DISK_IMPORT \
+    # Create the container
+    pct create $CT_ID $TEMPLATE_STRING \
         -arch $(dpkg --print-architecture) \
         -cores $CORE_COUNT \
-        -hostname $VMNAME \
+        -hostname $CT_NAME \
         -memory $RAM_SIZE \
         -nameserver 8.8.8.8 \
-        -net0 name=eth0,bridge=$BRG,firewall=1,gw=192.169.0.1,ip=192.169.0.201/24,type=veth$MAC$MTU$VLAN \
+        -net0 name=eth0,bridge=$BRG,firewall=1,gw=$GATE,ip=$NET,type=veth \
         -onboot 1 \
-        -ostype $OSTYPE \
+        -ostype ubuntu \
+        -rootfs local:$DISK_SIZE \
         -searchdomain aip.dxc.com \
         -startup order=3 \
-        -storage $(pvesm status | awk 'NR>1 {print $1}' | head -1) \
         -tags threat-analysis \
-        -timezone $timezone \
-        -unprivileged $CT_TYPE $CT_PW >/dev/null
-        
-    if [ "$VERB" == "yes" ]; then set +x; fi
+        -timezone $(cat /etc/timezone) \
+        -unprivileged $CT_TYPE >/dev/null 2>&1
+
     msg_ok "Created LXC Container"
 
-    msg_info "Configuring Container Network"
-    # Ensure the container has the correct network configuration
-    pct set $VMID -net0 name=eth0,bridge=$BRG,firewall=1,gw=192.169.0.1,ip=192.169.0.201/24,type=veth
-    msg_ok "Configured Container Network"
-
     msg_info "Starting LXC Container"
-    pct start $VMID
-    sleep 5
-    pct push $VMID /root/threat-analysis-install.sh /root/threat-analysis-install.sh -perms 755
+    pct start $CT_ID
+    sleep 10
     msg_ok "Started LXC Container"
 }
 
-# Function to create the installation script content
-create_install_script() {
-    cat <<'EOF' > /root/threat-analysis-install.sh
-#!/usr/bin/env bash
+function install_application() {
+    msg_info "Installing Threat Analysis Application"
+    
+    # Create and execute the installation script inside the container
+    pct exec $CT_ID -- bash -c '
+# Update system
+apt-get update >/dev/null 2>&1
+apt-get upgrade -y >/dev/null 2>&1
 
-# Copyright (c) 2025 DXC AIP Community Scripts
-# Author: DXC AIP Team  
-# License: MIT
+# Install dependencies
+apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release >/dev/null 2>&1
 
-# Color codes for output
-RD='\033[01;31m'
-YW='\033[33m'
-GN='\033[1;92m'
-CL='\033[m'
-BFR="\\r\\033[K"
-HOLD="-"
-CM="${GN}✓${CL}"
-CROSS="${RD}✗${CL}"
-BL="\033[36m"
-DGN="\033[32m"
+# Install Docker
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" >/etc/apt/sources.list.d/docker.list
+apt-get update >/dev/null 2>&1
+apt-get install -y docker-ce docker-ce-cli containerd.io >/dev/null 2>&1
+systemctl enable docker >/dev/null 2>&1
+systemctl start docker >/dev/null 2>&1
 
-# Functions
-msg_info() {
-    local msg="$1"
-    echo -ne " ${HOLD} ${YW}${msg}..."
+# Install Docker Compose
+DOCKER_COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep "tag_name" | cut -d\" -f4)
+curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose >/dev/null 2>&1
+chmod +x /usr/local/bin/docker-compose
+
+# Install Tailscale
+curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+
+# Create directories
+mkdir -p /opt/threat-analysis/{data,config,logs}
+mkdir -p /opt/traefik/{data,logs}
+mkdir -p /opt/deployment/{traefik/dynamic,config,templates,static}
+mkdir -p /opt/backups
+
+# Create Docker network
+docker network create traefik 2>/dev/null || true
+
+# Install Python dependencies
+apt-get install -y python3 python3-pip python3-venv >/dev/null 2>&1
+
+echo "Dependencies installed successfully"
+'
+    msg_ok "Installed Dependencies"
+
+    msg_info "Configuring Application Files"
+    # Copy application files to container
+    pct exec $CT_ID -- bash -c '
+# Create threat analysis application
+cat > /opt/deployment/threat_analysis_app.py << "APPEOF"
+#!/usr/bin/env python3
+"""
+Threat Analysis Web Application
+Modified to use external JSON configuration for valid areas
+"""
+
+import json
+import os
+from flask import Flask, render_template, request, jsonify
+from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
+
+threat_data = []
+valid_areas = []
+
+def load_config():
+    global valid_areas
+    config_path = os.environ.get("CONFIG_PATH", "./config/areas.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            valid_areas = config.get("valid_areas", [])
+            logger.info(f"Loaded {len(valid_areas)} valid areas")
+    except FileNotFoundError:
+        valid_areas = ["OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8"]
+        logger.info("Using default valid areas")
+
+def save_threat_data():
+    data_path = os.environ.get("DATA_PATH", "./data/threats.json")
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+    try:
+        with open(data_path, "w") as f:
+            json.dump(threat_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving threat data: {e}")
+
+def load_threat_data():
+    global threat_data
+    data_path = os.environ.get("DATA_PATH", "./data/threats.json")
+    try:
+        with open(data_path, "r") as f:
+            threat_data = json.load(f)
+    except FileNotFoundError:
+        threat_data = []
+
+@app.route("/")
+def index():
+    return render_template("index.html", valid_areas=valid_areas, threats=threat_data)
+
+@app.route("/api/threats", methods=["GET"])
+def get_threats():
+    return jsonify(threat_data)
+
+@app.route("/api/threats", methods=["POST"])
+def add_threat():
+    try:
+        data = request.get_json()
+        threat = {
+            "id": len(threat_data) + 1,
+            "timestamp": datetime.now().isoformat(),
+            "threat_type": data["threat_type"],
+            "area": data["area"],
+            "severity": data["severity"],
+            "description": data["description"],
+            "reporter": data.get("reporter", "Anonymous"),
+            "status": "Active"
+        }
+        threat_data.append(threat)
+        save_threat_data()
+        return jsonify({"message": "Threat added successfully", "threat": threat}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/health")
+def health_check():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+if __name__ == "__main__":
+    load_config()
+    load_threat_data()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+APPEOF
+
+# Create configuration file
+cat > /opt/deployment/config/areas.json << "CONFEOF"
+{
+  "valid_areas": ["OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8"],
+  "description": "Valid operational areas for threat analysis",
+  "version": "1.0"
+}
+CONFEOF
+
+# Create requirements file
+cat > /opt/deployment/requirements.txt << "REQEOF"
+Flask==2.3.3
+Werkzeug==2.3.7
+Jinja2==3.1.2
+requests==2.31.0
+REQEOF
+
+# Create Dockerfile
+cat > /opt/deployment/Dockerfile << "DOCKEREOF"
+FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y gcc curl && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY threat_analysis_app.py .
+COPY templates/ ./templates/
+COPY config/areas.json ./config/
+RUN mkdir -p /app/config /app/data
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+ENV CONFIG_PATH=/app/config/areas.json
+ENV DATA_PATH=/app/data/threats.json
+ENV PORT=5000
+EXPOSE 5000
+HEALTHCHECK --interval=30s --timeout=10s CMD curl -f http://localhost:5000/health || exit 1
+CMD ["python", "threat_analysis_app.py"]
+DOCKEREOF
+
+# Create Docker Compose
+SECRET_KEY=$(openssl rand -hex 32)
+cat > /opt/deployment/docker-compose.yml << COMPOSEEOF
+version: "3.8"
+services:
+  threat-analysis:
+    build: .
+    container_name: threat-analysis-app
+    restart: unless-stopped
+    environment:
+      - PORT=5000
+      - SECRET_KEY=$SECRET_KEY
+      - CONFIG_PATH=/app/config/areas.json
+      - DATA_PATH=/app/data/threats.json
+    volumes:
+      - /opt/threat-analysis/data:/app/data
+      - /opt/deployment/config:/app/config
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.threat-analysis.rule=Host(\`threat.aip.dxc.com\`)"
+      - "traefik.http.routers.threat-analysis.entrypoints=websecure"
+      - "traefik.http.routers.threat-analysis.tls=true"
+      - "traefik.http.services.threat-analysis.loadbalancer.server.port=5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--log.level=INFO"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /opt/traefik/data:/letsencrypt
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true
+COMPOSEEOF
+
+# Create basic HTML template
+mkdir -p /opt/deployment/templates
+cat > /opt/deployment/templates/index.html << "HTMLEOF"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Threat Analysis System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container">
+            <span class="navbar-brand">🛡️ Threat Analysis System</span>
+            <span class="navbar-text">Total Threats: {{ threats|length }}</span>
+        </div>
+    </nav>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-md-8 mx-auto">
+                <div class="card">
+                    <div class="card-header">Report New Threat</div>
+                    <div class="card-body">
+                        <form id="threat-form">
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">Threat Type</label>
+                                    <select class="form-select" name="threat_type" required>
+                                        <option value="">Select...</option>
+                                        <option value="Security Breach">Security Breach</option>
+                                        <option value="System Failure">System Failure</option>
+                                        <option value="Physical Threat">Physical Threat</option>
+                                        <option value="Cyber Attack">Cyber Attack</option>
+                                        <option value="Environmental">Environmental</option>
+                                        <option value="Other">Other</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">Area</label>
+                                    <select class="form-select" name="area" required>
+                                        <option value="">Select area...</option>
+                                        {% for area in valid_areas %}
+                                        <option value="{{ area }}">{{ area }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">Severity</label>
+                                    <select class="form-select" name="severity" required>
+                                        <option value="">Select...</option>
+                                        <option value="Low">Low</option>
+                                        <option value="Medium">Medium</option>
+                                        <option value="High">High</option>
+                                        <option value="Critical">Critical</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label class="form-label">Reporter</label>
+                                    <input type="text" class="form-control" name="reporter" placeholder="Your name">
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Description</label>
+                                <textarea class="form-control" name="description" rows="3" required></textarea>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Submit Threat Report</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        {% if threats %}
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">Current Threats</div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Type</th>
+                                        <th>Area</th>
+                                        <th>Severity</th>
+                                        <th>Description</th>
+                                        <th>Status</th>
+                                        <th>Time</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for threat in threats %}
+                                    <tr>
+                                        <td>#{{ threat.id }}</td>
+                                        <td>{{ threat.threat_type }}</td>
+                                        <td><span class="badge bg-info">{{ threat.area }}</span></td>
+                                        <td><span class="badge bg-warning">{{ threat.severity }}</span></td>
+                                        <td>{{ threat.description[:100] }}...</td>
+                                        <td><span class="badge bg-danger">{{ threat.status }}</span></td>
+                                        <td>{{ threat.timestamp[:19] }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById("threat-form").addEventListener("submit", function(e) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data = Object.fromEntries(formData.entries());
+            
+            fetch("/api/threats", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert("Threat reported successfully!");
+                location.reload();
+            })
+            .catch(error => {
+                alert("Error: " + error);
+            });
+        });
+    </script>
+</body>
+</html>
+HTMLEOF
+
+# Create management script
+cat > /usr/local/bin/threat-analysis << "MGMTEOF"
+#!/bin/bash
+COMPOSE_FILE="/opt/deployment/docker-compose.yml"
+
+case "$1" in
+    start)
+        echo "Starting Threat Analysis System..."
+        docker-compose -f $COMPOSE_FILE up -d
+        ;;
+    stop)
+        echo "Stopping Threat Analysis System..."
+        docker-compose -f $COMPOSE_FILE down
+        ;;
+    restart)
+        echo "Restarting Threat Analysis System..."
+        docker-compose -f $COMPOSE_FILE restart
+        ;;
+    status)
+        echo "Threat Analysis System Status:"
+        docker-compose -f $COMPOSE_FILE ps
+        ;;
+    logs)
+        docker-compose -f $COMPOSE_FILE logs -f --tail=100
+        ;;
+    health)
+        echo "Health Check:"
+        curl -s http://localhost/health || echo "Health check failed"
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|logs|health}"
+        exit 1
+        ;;
+esac
+MGMTEOF
+
+chmod +x /usr/local/bin/threat-analysis
+
+# Set up firewall
+ufw --force enable >/dev/null 2>&1
+ufw allow ssh >/dev/null 2>&1
+ufw allow 80/tcp >/dev/null 2>&1
+ufw allow 443/tcp >/dev/null 2>&1
+ufw allow 8080/tcp >/dev/null 2>&1
+
+# Copy config files
+cp -r /opt/deployment/config/* /opt/threat-analysis/config/
+chmod -R 755 /opt/threat-analysis /opt/traefik /opt/deployment
+
+# Set permissions
+chown -R 1000:1000 /opt/threat-analysis/data /opt/threat-analysis/config
+
+echo "Application configuration completed"
+'
+    msg_ok "Configured Application Files"
+
+    msg_info "Building and Starting Services"
+    pct exec $CT_ID -- bash -c '
+cd /opt/deployment
+docker-compose build >/dev/null 2>&1
+docker-compose up -d >/dev/null 2>&1
+sleep 15
+echo "Services started successfully"
+'
+    msg_ok "Services Started"
 }
 
-msg_ok() {
-    local msg="$1"
-    echo -e "${BFR} ${CM} ${GN}${msg}${CL}"
-}
-
-msg_error() {
-    local msg="$1"
-    echo -e "${BFR} ${CROSS} ${RD}${msg}${CL}"
-    exit 1
-}
-
-# Set error handling
-set -euo pipefail
-
-# Function definitions from functions library
-setting_up_container() {
-    msg_info "Setting up Container OS"
-    sed -i "/$LANG/ s/\(^# \)//" /etc/locale.gen
-    locale-gen >/dev/null
-    msg_ok "Set up Container OS"
-}
-
-network_check() {
-    msg_info "Checking Network Connection"
-    if ping -c 1 google.com &> /dev/null; then
-        msg_ok "Network Connection Established"
+function verify_installation() {
+    msg_info "Verifying Installation"
+    
+    # Wait for services to be ready
+    sleep 10
+    
+    # Check if application is responding
+    if pct exec $CT_ID -- curl -f http://localhost/health >/dev/null 2>&1; then
+        msg_ok "Application Health Check Passed"
     else
-        msg_error "Network Connection Failed"
+        msg_error "Application Health Check Failed - Check logs: pct exec $CT_ID -- threat-analysis logs"
+    fi
+    
+    # Check container status
+    if pct status $CT_ID | grep -q "running"; then
+        msg_ok "Container is Running"
+    else
+        msg_error "Container Status Issue"
     fi
 }
 
-update_os() {
-    msg_info "Updating Container OS"
-    apt-get update &>/dev/null
-    apt-get -o Dpkg::Options::="--force-confold" -y upgrade &>/dev/null
-    msg_ok "Updated Container OS"
-}
+function show_completion_info() {
+    echo -e "\n${RD}████████████████████████████████████████████████████████████████████████████${CL}"
+    echo -e "${RD}█                                                                          █${CL}"
+    echo -e "${RD}█    _______ _                    _       _                _           _   █${CL}" 
+    echo -e "${RD}█   |__   __| |                  | |     | |              | |         (_)  █${CL}"
+    echo -e "${RD}█      | |  | |__  _ __ ___  __ _| |_    / \\   _ __   __ _| |_   _ ___ _ ___█${CL}"
+    echo -e "${RD}█      | |  | '_ \\| '__/ _ \\/ _\` | __|   / _ \\ | '_ \\ / _\` | | | | / __| / __█${CL}"
+    echo -e "${RD}█      | |  | | | | | |  __/ (_| | |_   / ___ \\| | | | (_| | | |_| \\__ \\ \\__ █${CL}"
+    echo -e "${RD}█      |_|  |_| |_|_|  \\___|\\__,_|\\__| /_/   \\_\\_| |_|\\__,_|_|\\__, |___/_|___█${CL}"
+    echo -e "${RD}█                                                              __/ |        █${CL}"
+    echo -e "${RD}█                                                             |___/         █${CL}" 
+    echo -e "${RD}█                                                                          █${CL}"
+    echo -e "${RD}████████████████████████████████████████████████████████████████████████████${CL}"
 
-motd_ssh() {
-    msg_info "Customizing Container"
-    GETTY_OVERRIDE="/etc/systemd/system/container-getty@1.service.d/override.conf"
-    mkdir -p $(dirname $GETTY_OVERRIDE)
-    cat <<EOT >$GETTY_OVERRIDE
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud tty%i 115200,38400,9600 \$TERM
-EOT
-    systemctl daemon-reload
-    systemctl restart $(basename $(dirname $GETTY_OVERRIDE) | sed 's/\.d//')
-    msg_ok "Customized Container"
-}
+    echo -e "\n${GN}🚀 Threat Analysis LXC Container Created Successfully!${CL}\n"
 
-customize() {
-    msg_info "Customizing Container"
-    if [[ "$SSH" == "yes" ]]; then
-        sed -i "s/#PermitRootLogin prohibit-password/PermitRootLogin yes/g" /etc/ssh/sshd_config
-        systemctl enable ssh
-        systemctl restart ssh
-    fi
-    msg_ok "Customized Container"
-}
+    echo -e "${BL}📋 Container Details:${CL}"
+    echo -e "   🆔 Container ID: ${GN}$CT_ID${CL}"
+    echo -e "   🏷️  Container Name: ${GN}$CT_NAME${CL}"
+    echo -e "   🌐 IP Address: ${GN}$NET${CL}"
+    echo -e "   💾 Disk Size: ${GN}${DISK_SIZE}GB${CL}"
+    echo -e "   🧠 CPU Cores: ${GN}$CORE_COUNT${CL}"
+    echo -e "   🐏 RAM: ${GN}${RAM_SIZE}MB${CL}"
 
-# Variables
-STD=""
-if [[ "$VERB" != "yes" ]]; then STD="silent"; fi
-silent() { "$@" > /dev/null 2>&1; }
-LANG=C.UTF-8
+    echo -e "\n${BL}🌐 Application Access:${CL}"
+    echo -e "   🔗 Web Interface: ${GN}http://$GATE/threat-analysis${CL}"
+    echo -e "   🔧 Traefik Dashboard: ${GN}http://$GATE:8080${CL}"
+    echo -e "   ❤️  Health Check: ${GN}http://$GATE/health${CL}"
 
-# Color setup  
-color() {
-    YW=$(echo "\033[33m")
-    BL=$(echo "\033[36m")  
-    RD=$(echo "\033[01;31m")
-    BGN=$(echo "\033[4;92m")
-    GN=$(echo "\033[1;92m")
-    DGN=$(echo "\033[32m")
-    CL=$(echo "\033[m")
-    BFR="\\r\\033[K"
-    HOLD=" "
-    CM="${GN}✓${CL}"
-    CROSS="${RD}✗${CL}"
-    if [[ "$VERB" == "yes" ]]; then STD=""; fi
-}
+    echo -e "\n${BL}🛠️  Container Management:${CL}"
+    echo -e "   🚀 Start Container: ${GN}pct start $CT_ID${CL}"
+    echo -e "   🛑 Stop Container: ${GN}pct stop $CT_ID${CL}"
+    echo -e "   🔄 Restart Container: ${GN}pct restart $CT_ID${CL}"
+    echo -e "   💻 Enter Container: ${GN}pct enter $CT_ID${CL}"
 
-verb_ip6() {
-    if [[ "$DISABLEIP6" == "yes" ]]; then
-        echo "net.ipv6.conf.all.disable_ipv6 = 1" >>/etc/sysctl.conf
-        $STD sysctl -p
-    fi
-}
+    echo -e "\n${BL}📊 Application Management (inside container):${CL}"
+    echo -e "   🏁 Start Services: ${GN}threat-analysis start${CL}"
+    echo -e "   🛑 Stop Services: ${GN}threat-analysis stop${CL}"
+    echo -e "   📊 Check Status: ${GN}threat-analysis status${CL}"
+    echo -e "   📋 View Logs: ${GN}threat-analysis logs${CL}"
+    echo -e "   ❤️  Health Check: ${GN}threat-analysis health${CL}"
 
-catch_errors() {
-    set -Eeuo pipefail
-    trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
-}
+    echo -e "\n${YW}⚠️  Next Steps:${CL}"
+    echo -e "   1️⃣  Enter container: ${GN}pct enter $CT_ID${CL}"
+    echo -e "   2️⃣  Configure Tailscale: ${GN}tailscale up${CL}"
+    echo -e "   3️⃣  Test application: ${GN}curl http://localhost/health${CL}"
+    echo -e "   4️⃣  Access web interface: ${GN}http://$GATE/threat-analysis${CL}"
 
-error_handler() {
-    local exit_code=$?
-    local line_number=$1
-    local bash_lineno=$2
-    echo -e "\n$CROSS ERROR occurred in script at line $line_number: Exit code $exit_code"  
-    echo -e "Failing command: $bash_lineno"
-    exit $exit_code
-}
+    echo -e "\n${BL}🔧 Configuration Files:${CL}"
+    echo -e "   📂 App Config: ${GN}/opt/threat-analysis/config/areas.json${CL}"
+    echo -e "   🐳 Docker Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
 
-# Execute the installation with these settings
-SSH="no"
-VERB="no" 
-DISABLEIP6="no"
-
-# Source the main installation script content here
-# [The rest of the installation script from threat-analysis-install.sh goes here]
-EOF
-
-    chmod +x /root/threat-analysis-install.sh
+    echo -e "\n${GN}✅ Container is ready and application is running!${CL}"
+    echo -e "${YW}📝 Configure Tailscale for secure external access.${CL}\n"
 }
 
 # Main execution
-start_routines
+main() {
+    header_info
+    install_script
+    create_container
+    install_application
+    verify_installation
+    show_completion_info
+}
 
-msg_info "Installing Threat Analysis Application"
-create_install_script
-
-# Execute the installation inside the container
-pct exec $CT_ID -- bash -c "
-export FUNCTIONS_FILE_PATH='$(cat /root/threat-analysis-install.sh | base64 -w 0)'
-wget -qO- https://raw.githubusercontent.com/DXCSithlordPadawan/SolrSim/main/threat-analysis-install.sh | bash
-"
-
-# Final configuration
-msg_info "Completing Container Setup"
-if [[ "$SSH" == "yes" ]]; then
-    pct exec $CT_ID -- bash -c "
-        sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/g' /etc/ssh/sshd_config
-        systemctl enable ssh
-        systemctl restart ssh
-    "
+# Check if running on Proxmox
+if ! command -v pct &> /dev/null; then
+    echo -e "${CROSS} This script must be run on a Proxmox VE host"
+    exit 1
 fi
 
-# Container customization  
-pct exec $CT_ID -- bash -c "
-    GETTY_OVERRIDE='/etc/systemd/system/container-getty@1.service.d/override.conf'
-    mkdir -p \$(dirname \$GETTY_OVERRIDE)
-    cat <<EOT >\$GETTY_OVERRIDE
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud tty%i 115200,38400,9600 \\\$TERM
-EOT
-    systemctl daemon-reload
-    systemctl restart \$(basename \$(dirname \$GETTY_OVERRIDE) | sed 's/\.d//')
-"
+# Check for root privileges
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${CROSS} This script must be run as root"
+    exit 1
+fi
 
-msg_ok "Completed Container Setup"
-
-# Display completion message
-echo -e "\n${RD}████████████████████████████████████████████████████████████████████████████${CL}"
-echo -e "${RD}█                                                                          █${CL}"
-echo -e "${RD}█    _______ _                    _       _                _           _   █${CL}" 
-echo -e "${RD}█   |__   __| |                  | |     | |              | |         (_)  █${CL}"
-echo -e "${RD}█      | |  | |__  _ __ ___  __ _| |_    / \\   _ __   __ _| |_   _ ___ _ ___█${CL}"
-echo -e "${RD}█      | |  | '_ \\| '__/ _ \\/ _\` | __|   / _ \\ | '_ \\ / _\` | | | | / __| / __█${CL}"
-echo -e "${RD}█      | |  | | | | | |  __/ (_| | |_   / ___ \\| | | | (_| | | |_| \\__ \\ \\__ █${CL}"
-echo -e "${RD}█      |_|  |_| |_|_|  \\___|\\__,_|\\__| /_/   \\_\\_| |_|\\__,_|_|\\__, |___/_|___█${CL}"
-echo -e "${RD}█                                                              __/ |        █${CL}"
-echo -e "${RD}█                                                             |___/         █${CL}" 
-echo -e "${RD}█                                                                          █${CL}"
-echo -e "${RD}████████████████████████████████████████████████████████████████████████████${CL}"
-
-echo -e "\n${GN}🚀 Threat Analysis LXC Container Created Successfully!${CL}\n"
-
-echo -e "${BL}📋 Container Details:${CL}"
-echo -e "   🆔 Container ID: ${GN}$CT_ID${CL}"
-echo -e "   🏷️  Container Name: ${GN}$CT_NAME${CL}"
-echo -e "   🌐 IP Address: ${GN}192.169.0.201${CL}"
-echo -e "   💾 Disk Size: ${GN}${DISK_SIZE}GB${CL}"
-echo -e "   🧠 CPU Cores: ${GN}$CORE_COUNT${CL}"
-echo -e "   🐏 RAM: ${GN}${RAM_SIZE}MB${CL}"
-
-echo -e "\n${BL}🌐 Application Access:${CL}"
-echo -e "   🔗 Web Interface: ${GN}https://threat.aip.dxc.com${CL}"
-echo -e "   🔧 Traefik Dashboard: ${GN}https://traefik.aip.dxc.com:8080${CL}"
-echo -e "   ❤️  Health Check: ${GN}https://threat.aip.dxc.com/health${CL}"
-
-echo -e "\n${BL}🛠️  Container Management:${CL}"
-echo -e "   🚀 Start Container: ${GN}pct start $CT_ID${CL}"
-echo -e "   🛑 Stop Container: ${GN}pct stop $CT_ID${CL}"
-echo -e "   🔄 Restart Container: ${GN}pct restart $CT_ID${CL}"
-echo -e "   💻 Enter Container: ${GN}pct enter $CT_ID${CL}"
-
-echo -e "\n${BL}📊 Application Management (inside container):${CL}"
-echo -e "   🏁 Start Services: ${GN}threat-analysis start${CL}"
-echo -e "   🛑 Stop Services: ${GN}threat-analysis stop${CL}"
-echo -e "   📊 Check Status: ${GN}threat-analysis status${CL}"
-echo -e "   📋 View Logs: ${GN}threat-analysis logs${CL}"
-echo -e "   💾 Create Backup: ${GN}threat-analysis backup${CL}"
-
-echo -e "\n${YW}⚠️  Next Steps:${CL}"
-echo -e "   1️⃣  Enter container: ${GN}pct enter $CT_ID${CL}"
-echo -e "   2️⃣  Configure Tailscale: ${GN}tailscale up${CL}"
-echo -e "   3️⃣  Verify SSL certificates are obtained"
-echo -e "   4️⃣  Update DNS entries for threat.aip.dxc.com"
-echo -e "   5️⃣  Test application access"
-
-echo -e "\n${BL}🔧 Configuration Files:${CL}"
-echo -e "   📂 App Config: ${GN}/opt/threat-analysis/config/areas.json${CL}"
-echo -e "   🐳 Docker Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
-echo -e "   🌐 Traefik Config: ${GN}/opt/deployment/traefik/dynamic/middleware.yml${CL}"
-
-echo -e "\n${GN}✅ Container is ready and application is running!${CL}"
-echo -e "${YW}📝 Don't forget to configure Tailscale and DNS entries.${CL}\n"
+# Handle command line arguments
+case "${1:-main}" in
+    --help)
+        echo "Threat Analysis Proxmox Container Creation Script"
+        echo "Usage: $0 [--help]"
+        echo "Run without arguments for interactive installation"
+        ;;
+    *)
+        main
+        ;;
+esac
