@@ -915,7 +915,7 @@ chown -R 1000:1000 /opt/threat-analysis/data /opt/threat-analysis/config
 
 # Enable podman to start containers at boot
 systemctl enable podman-restart.service 2>/dev/null || true
-
+'
     
     if [ $? -ne 0 ]; then
         msg_error "Failed to configure application"
