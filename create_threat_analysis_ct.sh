@@ -507,7 +507,7 @@ function install_application() {
 
     msg_info "Configuring Application"
     # Create application files inside container
-    pct exec $CT_ID -- bash -c '
+    if ! pct exec $CT_ID -- bash -c '
 # Create threat analysis application
 cat > /opt/deployment/threat_analysis_app.py << '\''APPEOF'\''
 #!/usr/bin/env python3
@@ -916,19 +916,19 @@ chown -R 1000:1000 /opt/threat-analysis/data /opt/threat-analysis/config
 # Enable podman to start containers at boot
 systemctl enable podman-restart.service 2>/dev/null || true
 
-    
-    if [ $? -ne 0 ]; then
+'; then
         msg_error "Failed to configure application"
     fi
     msg_ok "Configured Application"
 
     msg_info "Building and Starting Services"
-    if ! pct exec $CT_ID -- bash -c '
-        cd /opt/deployment
-        podman-compose build
-        podman-compose up -d
-        sleep 20
-    '; then
+    if ! pct exec $CT_ID -- bash << 'EOF'
+    cd /opt/deployment
+    podman-compose build
+    podman-compose up -d
+    sleep 20
+EOF
+then
         msg_error "Failed to start services"
     fi
     msg_ok "Services Started"
