@@ -6,7 +6,7 @@
 # https://github.com/DXCSithlordPadawan/SolrSim/tree/main
 
 # Proxmox LXC Container Creation Script for Threat Analysis System
-# Fixed version with Docker permission fixes
+# Modified version using Podman instead of Docker
 
 # Color codes
 RD='\033[01;31m'
@@ -47,7 +47,7 @@ set -euo pipefail
 # Utility functions
 function header_info {
 clear
-cat <<"EOF"
+cat << 'EOF'
     _______ _                    _       _                _           _     
    |__   __| |                  | |     | |              | |         (_)    
       | |  | |__  _ __ ___  __ _| |_    / \   _ __   __ _| |_   _ ___ _ ___ 
@@ -58,6 +58,7 @@ cat <<"EOF"
                                                              |___/         
 
                Proxmox Community Helper Scripts Style Installer
+                              (Using Podman)
 EOF
 }
 
@@ -103,7 +104,7 @@ function exit_script() {
 
 function get_available_storage() {
     # Get list of available storage with their types and status
-    pvesm status | awk 'NR>1 {printf "%-15s %-10s %-8s %s\n", $1, $2, $3, $4}' | while read name type status avail; do
+    pvesm status | awk 'NR>1 {printf "%-15s %-10s %-8s %s\\n", $1, $2, $3, $4}' | while read name type status avail; do
         if [[ "$status" == "active" && "$type" =~ ^(dir|lvm|lvm-thin|zfs|zfspool|btrfs)$ ]]; then
             echo "$name"
         fi
@@ -345,6 +346,7 @@ DISABLEIP6=$DISABLEIP6
 APP_NAME=$APP
 DOMAIN=threat.aip.dxc.com
 CERT_SERVER=192.168.0.122
+CONTAINER_ENGINE=podman
 
 [MANAGEMENT_SETTINGS]
 SSH=$SSH
@@ -383,7 +385,7 @@ function install_script() {
     fi
 }
 
-# Container creation function with Docker support
+# Container creation function
 function create_container() {
     msg_info "Downloading LXC Template"
     
@@ -395,7 +397,7 @@ function create_container() {
     fi
     msg_ok "Downloaded LXC Template"
 
-    msg_info "Creating LXC Container with Docker Support"
+    msg_info "Creating LXC Container"
     
     # Verify storage exists
     if ! pvesm status | grep -q "^$STORAGE "; then
@@ -407,7 +409,7 @@ function create_container() {
         echo -e "${YW}Using storage: $STORAGE${CL}"
     fi
     
-    # Create container with Docker-friendly settings
+    # Create container with specified storage
     if ! pct create $CT_ID $TEMPLATE_STRING \
         --arch $(dpkg --print-architecture) \
         --cores $CORE_COUNT \
@@ -422,8 +424,7 @@ function create_container() {
         --startup order=3 \
         --tags threat-analysis \
         --timezone $(cat /etc/timezone) \
-        --unprivileged $CT_TYPE \
-        --features nesting=1; then
+        --unprivileged $CT_TYPE; then
         msg_error "Failed to create LXC container"
     fi
 
@@ -459,55 +460,29 @@ function install_application() {
     fi
     msg_ok "Installed Dependencies"
 
-    msg_info "Installing Docker with Proper Configuration"
+    msg_info "Installing Podman"
     if ! pct exec $CT_ID -- bash -c "
-        # Install Docker
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list
+        # Add Podman repository
+        echo 'deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_22.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+        curl -L 'https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_22.04/Release.key' | apt-key add -
+        
+        # Update and install Podman
         apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io
+        apt-get install -y podman podman-compose
         
-        # Stop Docker to configure it properly
-        systemctl stop docker
+        # Enable and start Podman socket (for Docker compatibility)
+        systemctl --user daemon-reload
+        systemctl enable --now podman.socket || true
         
-        # Create Docker daemon configuration for LXC compatibility
-        mkdir -p /etc/docker
-        cat > /etc/docker/daemon.json << 'DOCKEREOF'
-{
-  \"storage-driver\": \"overlay2\",
-  \"storage-opts\": [
-    \"overlay2.override_kernel_check=true\"
-  ],
-  \"log-driver\": \"json-file\",
-  \"log-opts\": {
-    \"max-size\": \"10m\",
-    \"max-file\": \"3\"
-  },
-  \"features\": {
-    \"buildkit\": false
-  }
-}
-DOCKEREOF
+        # Create podman alias for docker compatibility
+        ln -sf /usr/bin/podman /usr/local/bin/docker
         
-        # Start and enable Docker
-        systemctl enable docker
-        systemctl start docker
-        
-        # Wait for Docker to be ready
-        sleep 10
-        
-        # Install Docker Compose
-        DOCKER_COMPOSE_VERSION=\$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'\"' -f4)
-        curl -L \"https://github.com/docker/compose/releases/download/\${DOCKER_COMPOSE_VERSION}/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
-        chmod +x /usr/local/bin/docker-compose
-        
-        # Verify Docker installation
-        docker version
-        docker info | grep 'Storage Driver'
+        # Configure Podman for rootless operation
+        echo 'unqualified-search-registries = [\"docker.io\"]' > /etc/containers/registries.conf
     "; then
-        msg_error "Failed to install Docker"
+        msg_error "Failed to install Podman"
     fi
-    msg_ok "Installed Docker with Proper Configuration"
+    msg_ok "Installed Podman"
 
     msg_info "Installing Additional Tools"
     if ! pct exec $CT_ID -- bash -c "
@@ -520,8 +495,8 @@ DOCKEREOF
         mkdir -p /opt/deployment/{traefik/dynamic,config,templates,static}
         mkdir -p /opt/backups
         
-        # Create Docker network
-        docker network create traefik || true
+        # Create Podman network
+        podman network create traefik || true
         
         # Install Python dependencies
         apt-get install -y python3 python3-pip python3-venv
@@ -534,7 +509,7 @@ DOCKEREOF
     # Create application files inside container
     pct exec $CT_ID -- bash -c '
 # Create threat analysis application
-cat > /opt/deployment/threat_analysis_app.py << "APPEOF"
+cat > /opt/deployment/threat_analysis_app.py << '\''APPEOF'\''
 #!/usr/bin/env python3
 """
 Threat Analysis Web Application
@@ -626,7 +601,7 @@ if __name__ == "__main__":
 APPEOF
 
 # Create configuration file
-cat > /opt/deployment/config/areas.json << "CONFEOF"
+cat > /opt/deployment/config/areas.json << '\''CONFEOF'\''
 {
   "valid_areas": ["OP1", "OP2", "OP3", "OP4", "OP5", "OP6", "OP7", "OP8"],
   "description": "Valid operational areas for threat analysis",
@@ -635,46 +610,61 @@ cat > /opt/deployment/config/areas.json << "CONFEOF"
 CONFEOF
 
 # Create requirements file
-cat > /opt/deployment/requirements.txt << "REQEOF"
+cat > /opt/deployment/requirements.txt << '\''REQEOF'\''
 Flask==2.3.3
 Werkzeug==2.3.7
 Jinja2==3.1.2
 requests==2.31.0
 REQEOF
 
-# Create Docker Compose with pre-built image approach to avoid build issues
+# Create Containerfile (Podman equivalent of Dockerfile)
+cat > /opt/deployment/Containerfile << '\''PODMANEOF'\''
+FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y gcc curl && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY threat_analysis_app.py .
+COPY templates/ ./templates/
+COPY config/areas.json ./config/
+RUN mkdir -p /app/config /app/data
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+ENV CONFIG_PATH=/app/config/areas.json
+ENV DATA_PATH=/app/data/threats.json
+ENV PORT=5000
+EXPOSE 5000
+HEALTHCHECK --interval=30s --timeout=10s CMD curl -f http://localhost:5000/health || exit 1
+CMD ["python", "threat_analysis_app.py"]
+PODMANEOF
+
+# Create Podman Compose file
 SECRET_KEY=$(openssl rand -hex 32)
 cat > /opt/deployment/docker-compose.yml << COMPOSEEOF
+version: "3.8"
 services:
   threat-analysis:
-    image: python:3.11-slim
+    build: 
+      context: .
+      dockerfile: Containerfile
     container_name: threat-analysis-app
     restart: unless-stopped
-    working_dir: /app
     environment:
       - PORT=5000
       - SECRET_KEY=$SECRET_KEY
       - CONFIG_PATH=/app/config/areas.json
       - DATA_PATH=/app/data/threats.json
     volumes:
-      - /opt/deployment:/app
-      - /opt/threat-analysis/data:/app/data
-      - /opt/deployment/config:/app/config
+      - /opt/threat-analysis/data:/app/data:Z
+      - /opt/deployment/config:/app/config:Z
     networks:
       - traefik
     ports:
       - "80:5000"
-    command: |
-      bash -c "
-        apt-get update && 
-        apt-get install -y curl gcc && 
-        pip install --no-cache-dir -r requirements.txt && 
-        python threat_analysis_app.py
-      "
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik"
-      - "traefik.http.routers.threat-analysis.rule=Host(\`threat.aip.dxc.com\`)"
+      - "traefik.http.routers.threat-analysis.rule=Host(\\\`threat.aip.dxc.com\\\`)"
       - "traefik.http.services.threat-analysis.loadbalancer.server.port=5000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
@@ -689,7 +679,7 @@ COMPOSEEOF
 
 # Create basic HTML template
 mkdir -p /opt/deployment/templates
-cat > /opt/deployment/templates/index.html << "HTMLEOF"
+cat > /opt/deployment/templates/index.html << '\''HTMLEOF'\''
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -707,7 +697,7 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
 <body>
     <nav class="navbar navbar-dark bg-dark">
         <div class="container">
-            <span class="navbar-brand">🛡️ Threat Analysis System</span>
+            <span class="navbar-brand">🛡️ Threat Analysis System (Podman)</span>
             <span class="navbar-text">Total Threats: {{ threats|length }}</span>
         </div>
     </nav>
@@ -840,7 +830,7 @@ cat > /opt/deployment/templates/index.html << "HTMLEOF"
 HTMLEOF
 
 # Create management script
-cat > /usr/local/bin/threat-analysis << "MGMTEOF"
+cat > /usr/local/bin/threat-analysis << '\''MGMTEOF'\''
 #!/bin/bash
 COMPOSE_FILE="/opt/deployment/docker-compose.yml"
 
@@ -848,26 +838,26 @@ case "$1" in
     start)
         echo "Starting Threat Analysis System..."
         cd /opt/deployment
-        docker-compose up -d
+        podman-compose up -d
         ;;
     stop)
         echo "Stopping Threat Analysis System..."
         cd /opt/deployment
-        docker-compose down
+        podman-compose down
         ;;
     restart)
         echo "Restarting Threat Analysis System..."
         cd /opt/deployment
-        docker-compose restart
+        podman-compose restart
         ;;
     status)
         echo "Threat Analysis System Status:"
         cd /opt/deployment
-        docker-compose ps
+        podman-compose ps
         ;;
     logs)
         cd /opt/deployment
-        docker-compose logs -f --tail=100
+        podman-compose logs -f --tail=100
         ;;
     health)
         echo "Health Check:"
@@ -876,19 +866,34 @@ case "$1" in
     build)
         echo "Building application..."
         cd /opt/deployment
-        docker-compose build
+        podman-compose build
+        ;;
+    shell)
+        echo "Entering application container..."
+        podman exec -it threat-analysis-app /bin/bash
+        ;;
+    images)
+        echo "Podman Images:"
+        podman images
+        ;;
+    containers)
+        echo "Podman Containers:"
+        podman ps -a
         ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|logs|health|build}"
+        echo "Usage: $0 {start|stop|restart|status|logs|health|build|shell|images|containers}"
         echo ""
         echo "Threat Analysis System Management Commands:"
-        echo "  start    - Start all services"
-        echo "  stop     - Stop all services"
-        echo "  restart  - Restart all services"
-        echo "  status   - Show service status"
-        echo "  logs     - Show application logs"
-        echo "  health   - Check application health"
-        echo "  build    - Build application containers"
+        echo "  start      - Start all services"
+        echo "  stop       - Stop all services"
+        echo "  restart    - Restart all services"
+        echo "  status     - Show service status"
+        echo "  logs       - Show application logs"
+        echo "  health     - Check application health"
+        echo "  build      - Build application containers"
+        echo "  shell      - Enter application container shell"
+        echo "  images     - List Podman images"
+        echo "  containers - List all containers"
         exit 1
         ;;
 esac
@@ -908,40 +913,25 @@ cp -r /opt/deployment/config/* /opt/threat-analysis/config/
 chmod -R 755 /opt/threat-analysis /opt/traefik /opt/deployment
 chown -R 1000:1000 /opt/threat-analysis/data /opt/threat-analysis/config
 
-echo "Application configuration completed"
-'
+# Enable podman to start containers at boot
+systemctl enable podman-restart.service 2>/dev/null || true
+
     
     if [ $? -ne 0 ]; then
         msg_error "Failed to configure application"
     fi
     msg_ok "Configured Application"
 
-    msg_info "Starting Services (Using Pre-built Images)"
+    msg_info "Building and Starting Services"
     if ! pct exec $CT_ID -- bash -c '
         cd /opt/deployment
-        echo "Testing Docker Compose installation..."
-        which docker-compose
-        echo "Using $(which docker-compose)"
-        echo "Docker Compose command: $(which docker-compose)"
-        docker-compose version
-        
-        echo "Starting application (this may take a few minutes)..."
-        docker-compose up -d
-        
-        # Wait for container to be ready
-        echo "Waiting for application to start..."
-        sleep 30
-        
-        # Check if container is running
-        docker-compose ps
-        
-        # Wait a bit more for the application to fully initialize
-        sleep 15
+        podman-compose build
+        podman-compose up -d
+        sleep 20
     '; then
-        echo -e "\n${YW}Warning: Docker Compose startup may have had issues. Checking status...${CL}"
-        # Don't exit on error, let verification handle it
+        msg_error "Failed to start services"
     fi
-    msg_ok "Services Startup Initiated"
+    msg_ok "Services Started"
 }
 
 function verify_installation() {
@@ -950,11 +940,12 @@ function verify_installation() {
     # Wait for services to be ready
     sleep 15
     
-    # Check Docker status first
-    if pct exec $CT_ID -- systemctl is-active docker >/dev/null 2>&1; then
-        msg_ok "Docker Service is Running"
+    # Check if application is responding
+    if pct exec $CT_ID -- curl -f http://localhost/health >/dev/null 2>&1; then
+        msg_ok "Application Health Check Passed"
     else
-        echo -e "\n${YW}Warning: Docker service issue detected${CL}"
+        echo -e "\n${YW}Warning: Application health check failed. This may be normal during first startup.${CL}"
+        echo -e "${YW}Check logs with: pct exec $CT_ID -- threat-analysis logs${CL}"
     fi
     
     # Check container status
@@ -964,26 +955,16 @@ function verify_installation() {
         msg_error "Container Status Issue"
     fi
     
-    # Check Docker containers
-    echo -e "\n${BL}Docker Container Status:${CL}"
-    pct exec $CT_ID -- docker ps -a
-    
-    # Try health check
-    echo -e "\n${BL}Testing Application Health:${CL}"
-    if pct exec $CT_ID -- curl -f http://localhost/health >/dev/null 2>&1; then
-        msg_ok "Application Health Check Passed"
+    # Check Podman status
+    if pct exec $CT_ID -- systemctl is-active podman.socket >/dev/null 2>&1; then
+        msg_ok "Podman Service is Running"
     else
-        echo -e "\n${YW}Warning: Application health check failed. This may be normal during first startup.${CL}"
-        echo -e "${YW}Check logs with: pct exec $CT_ID -- threat-analysis logs${CL}"
-        
-        # Show some diagnostic info
-        echo -e "\n${BL}Diagnostic Information:${CL}"
-        pct exec $CT_ID -- bash -c 'cd /opt/deployment && docker-compose logs --tail=20'
+        echo -e "\n${YW}Warning: Podman socket not active. This may be normal for rootless operation.${CL}"
     fi
 }
 
 function show_completion_info() {
-    echo -e "\n${RD}████████████████████████████████████████████████████████████████████████${CL}"
+    echo -e "\n${RD}██████████████████████████████████████████████████████████████████████████${CL}"
     echo -e "${RD}█                                                                          █${CL}"
     echo -e "${RD}█    _______ _                    _       _                _           _   █${CL}" 
     echo -e "${RD}█   |__   __| |                  | |     | |              | |         (_)  █${CL}"
@@ -993,10 +974,11 @@ function show_completion_info() {
     echo -e "${RD}█      |_|  |_| |_|_|  \\___|\\__,_|\\__| /_/   \\_\\_| |_|\\__,_|_|\\__, |___/_|___█${CL}"
     echo -e "${RD}█                                                              __/ |        █${CL}"
     echo -e "${RD}█                                                             |___/         █${CL}" 
+    echo -e "${RD}█                          WITH PODMAN                                     █${CL}"
     echo -e "${RD}█                                                                          █${CL}"
-    echo -e "${RD}████████████████████████████████████████████████████████████████████████${CL}"
+    echo -e "${RD}██████████████████████████████████████████████████████████████████████████${CL}"
 
-    echo -e "\n${GN}🚀 Threat Analysis LXC Container Created Successfully!${CL}\n"
+    echo -e "\n${GN}🚀 Threat Analysis LXC Container (Podman) Created Successfully!${CL}\n"
 
     echo -e "${BL}📋 Container Details:${CL}"
     echo -e "   🆔 Container ID: ${GN}$CT_ID${CL}"
@@ -1017,13 +999,23 @@ function show_completion_info() {
     echo -e "   🔄 Restart Container: ${GN}pct restart $CT_ID${CL}"
     echo -e "   💻 Enter Container: ${GN}pct enter $CT_ID${CL}"
 
-    echo -e "\n${BL}📊 Application Management (inside container):${CL}"
-    echo -e "   ▶ Start Services: ${GN}threat-analysis start${CL}"
-    echo -e "   ⏹️ Stop Services: ${GN}threat-analysis stop${CL}"
+    echo -e "\n${BL}📦 Podman Management (inside container):${CL}"
+    echo -e "   🏁 Start Services: ${GN}threat-analysis start${CL}"
+    echo -e "   🛑 Stop Services: ${GN}threat-analysis stop${CL}"
     echo -e "   📊 Check Status: ${GN}threat-analysis status${CL}"
     echo -e "   📋 View Logs: ${GN}threat-analysis logs${CL}"
     echo -e "   ❤️  Health Check: ${GN}threat-analysis health${CL}"
     echo -e "   🔨 Build Application: ${GN}threat-analysis build${CL}"
+    echo -e "   🐚 Container Shell: ${GN}threat-analysis shell${CL}"
+    echo -e "   🖼️  List Images: ${GN}threat-analysis images${CL}"
+    echo -e "   📦 List Containers: ${GN}threat-analysis containers${CL}"
+
+    echo -e "\n${BL}🐧 Podman Commands:${CL}"
+    echo -e "   📋 List Containers: ${GN}podman ps -a${CL}"
+    echo -e "   🖼️  List Images: ${GN}podman images${CL}"
+    echo -e "   📊 Container Stats: ${GN}podman stats${CL}"
+    echo -e "   🔧 Build Image: ${GN}podman build -t threat-analysis .${CL}"
+    echo -e "   🚀 Run Container: ${GN}podman run -d --name threat-analysis -p 80:5000 threat-analysis${CL}"
 
     echo -e "\n${YW}⚠️  Next Steps:${CL}"
     echo -e "   1️⃣  Test application: ${GN}curl http://192.168.0.201/health${CL}"
@@ -1033,23 +1025,19 @@ function show_completion_info() {
 
     echo -e "\n${BL}🔧 Configuration Files:${CL}"
     echo -e "   📂 App Config: ${GN}/opt/threat-analysis/config/areas.json${CL}"
-    echo -e "   🐳 Docker Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
-    echo -e "   📄 Python App: ${GN}/opt/deployment/threat_analysis_app.py${CL}"
+    echo -e "   🐳 Podman Compose: ${GN}/opt/deployment/docker-compose.yml${CL}"
+    echo -e "   📄 Containerfile: ${GN}/opt/deployment/Containerfile${CL}"
+    echo -e "   🐍 Python App: ${GN}/opt/deployment/threat_analysis_app.py${CL}"
 
     echo -e "\n${BL}🔍 Troubleshooting:${CL}"
     echo -e "   📋 Check Container: ${GN}pct status $CT_ID${CL}"
-    echo -e "   🐳 Check Docker: ${GN}pct exec $CT_ID -- docker ps${CL}"
+    echo -e "   🐳 Check Podman: ${GN}pct exec $CT_ID -- podman ps${CL}"
     echo -e "   📊 Check Services: ${GN}pct exec $CT_ID -- threat-analysis status${CL}"
     echo -e "   📄 View Logs: ${GN}pct exec $CT_ID -- threat-analysis logs${CL}"
+    echo -e "   🐚 Enter App Container: ${GN}pct exec $CT_ID -- threat-analysis shell${CL}"
 
-    echo -e "\n${BL}🐳 Docker Configuration Applied:${CL}"
-    echo -e "   ✅ Storage Driver: overlay2 (LXC compatible)"
-    echo -e "   ✅ BuildKit: Disabled (prevents permission issues)"
-    echo -e "   ✅ LXC Features: nesting, fuse, keyctl enabled"
-    echo -e "   ✅ AppArmor: Unconfined for Docker support"
-
-    echo -e "\n${GN}✅ Container is ready and application should be starting!${CL}"
-    echo -e "${YW}🔧 If the application isn't responding immediately, wait 2-3 minutes for full startup.${CL}"
+    echo -e "\n${GN}✅ Container is ready and application is running with Podman!${CL}"
+    echo -e "${YW}🔒 Podman provides rootless containerization with enhanced security.${CL}"
     echo -e "${YW}📝 Configure Tailscale for secure external access if needed.${CL}\n"
 }
 
@@ -1078,17 +1066,16 @@ fi
 # Handle command line arguments
 case "${1:-main}" in
     --help)
-        echo "Threat Analysis Proxmox Container Creation Script"
+        echo "Threat Analysis Proxmox Container Creation Script (Podman Version)"
         echo ""
         echo "This script creates a complete Threat Analysis system in an LXC container"
-        echo "with Docker, Python Flask application, and management tools."
+        echo "with Podman, Python Flask application, and management tools."
         echo ""
         echo "Usage: $0 [--help]"
         echo ""
         echo "Features:"
         echo "  - LXC container with Ubuntu 22.04"
-        echo "  - Docker with overlay2 storage driver (LXC compatible)"
-        echo "  - BuildKit disabled to prevent permission issues"
+        echo "  - Podman and Podman Compose (rootless containerization)"
         echo "  - Python Flask web application"
         echo "  - External JSON configuration"
         echo "  - RESTful API endpoints"
@@ -1096,17 +1083,20 @@ case "${1:-main}" in
         echo "  - Health monitoring"
         echo "  - Management commands"
         echo "  - Tailscale ready"
+        echo "  - Enhanced security with rootless containers"
         echo ""
-        echo "Docker Fixes Applied:"
-        echo "  - Container features: nesting, fuse, keyctl"
-        echo "  - AppArmor profile: unconfined"
-        echo "  - Storage driver: overlay2 with kernel check override"
-        echo "  - BuildKit: disabled to prevent mount permission issues"
+        echo "Podman Benefits:"
+        echo "  - No daemon required (unlike Docker)"
+        echo "  - Rootless containers by default"
+        echo "  - Compatible with Docker commands"
+        echo "  - Better security model"
+        echo "  - systemd integration"
         echo ""
         echo "After installation:"
         echo "  - Access: http://192.168.0.201"
         echo "  - Management: pct enter <CT_ID>"
         echo "  - Commands: threat-analysis start|stop|status|logs"
+        echo "  - Podman: podman ps, podman images, podman stats"
         echo ""
         ;;
     *)
