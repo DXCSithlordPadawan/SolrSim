@@ -104,16 +104,56 @@ function exit_script() {
 
 function get_available_storage() {
     # Get list of available storage with their types and status
-    pvesm status | awk 'NR>1 {printf "%-15s %-10s %-8s %s\\n", $1, $2, $3, $4}' | while read name type status avail; do
-        if [[ "$status" == "active" && "$type" =~ ^(dir|lvm|lvm-thin|zfs|zfspool|btrfs)$ ]]; then
-            echo "$name"
+    # Explicitly exclude Ceph storage types (rbd, cephfs) as they don't support LXC containers
+    local valid_storage=()
+    local ceph_found=false
+    
+    while read name type status avail; do
+        if [[ "$status" == "active" ]]; then
+            # Check if it's a Ceph storage type
+            if [[ "$type" =~ ^(rbd|cephfs)$ ]]; then
+                ceph_found=true
+                continue
+            fi
+            # Include only non-Ceph storage types that support LXC containers
+            if [[ "$type" =~ ^(dir|lvm|lvm-thin|lvmthin|zfs|zfspool|btrfs)$ ]]; then
+                valid_storage+=("$name")
+                echo "$name"
+            fi
         fi
-    done | head -20  # Limit to first 20 storage options
+    done < <(pvesm status | awk 'NR>1 {print $1, $2, $3, $4}')
+    
+    # Check if only Ceph storage was found and no valid storage is available
+    if [ ${#valid_storage[@]} -eq 0 ] && [ "$ceph_found" = true ]; then
+        echo -e "${CROSS} ${RD}Error: Only Ceph storage types (rbd, cephfs) found.${CL}" >&2
+        echo -e "${RD}Ceph storage does not support LXC containers.${CL}" >&2
+        echo -e "${RD}Please configure a supported storage type (dir, lvm, lvm-thin, lvmthin, zfs, zfspool, btrfs).${CL}" >&2
+        exit 1
+    fi
 }
 
 function default_settings() {
     NEXTID=$(pvesh get /cluster/nextid)
     CT_ID="$NEXTID"
+    
+    # Validate and set storage using the same logic as advanced settings
+    available_storages=()
+    while IFS= read -r storage_name; do
+        if [ -n "$storage_name" ]; then
+            available_storages+=("$storage_name")
+        fi
+    done < <(get_available_storage)
+    
+    # Set default storage preference: pve1 first, then current STORAGE, then first available
+    if printf '%s\n' "${available_storages[@]}" | grep -q "^pve1$"; then
+        STORAGE="pve1"
+    elif [ -n "$STORAGE" ] && printf '%s\n' "${available_storages[@]}" | grep -q "^$STORAGE$"; then
+        # Keep current STORAGE if it's in the available list
+        :
+    elif [ ${#available_storages[@]} -gt 0 ]; then
+        # Use first available storage
+        STORAGE="${available_storages[0]}"
+    fi
     
     echo -e "${BL}Using Default Settings${CL}"
     echo -e "${DGN}Using CT Type ${BGN}Unprivileged${CL} ${RD}(Recommended)${CL}"
@@ -208,15 +248,20 @@ function advanced_settings() {
 
     # Storage Selection
     if command -v whiptail >/dev/null 2>&1; then
-        # Get available storage options
+        # Get available storage options (this will exit if only Ceph storage is found)
         STORAGE_OPTIONS=""
         STORAGE_COUNT=0
+        available_storages=()
         
-        # Create whiptail menu options
+        # Collect available storage options
         while IFS= read -r storage_name; do
             if [ -n "$storage_name" ]; then
+                available_storages+=("$storage_name")
                 STORAGE_COUNT=$((STORAGE_COUNT + 1))
-                if [ "$storage_name" = "pve1" ] || [ "$storage_name" = "$STORAGE" ]; then
+                # Prefer pve1 if available, otherwise prefer first valid storage
+                if [ "$storage_name" = "pve1" ]; then
+                    STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" ON"
+                elif [ "$storage_name" = "$STORAGE" ]; then
                     STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" ON"
                 else
                     STORAGE_OPTIONS="$STORAGE_OPTIONS \"$storage_name\" \"$storage_name\" OFF"
@@ -225,10 +270,21 @@ function advanced_settings() {
         done < <(get_available_storage)
         
         if [ $STORAGE_COUNT -gt 0 ]; then
+            # Set default storage preference: pve1 first, then current STORAGE, then first available
+            if printf '%s\n' "${available_storages[@]}" | grep -q "^pve1$"; then
+                STORAGE="pve1"
+            elif [ -n "$STORAGE" ] && printf '%s\n' "${available_storages[@]}" | grep -q "^$STORAGE$"; then
+                # Keep current STORAGE if it's in the available list
+                :
+            else
+                # Use first available storage
+                STORAGE="${available_storages[0]}"
+            fi
+            
             # Show storage selection dialog
             eval "STORAGE=\$(whiptail --title \"STORAGE SELECTION\" --radiolist \"Choose Storage for Container\" 15 70 10 $STORAGE_OPTIONS 3>&1 1>&2 2>&3)" || exit_script
         else
-            # Fallback to detecting storage automatically
+            # Fallback to detecting storage automatically (this shouldn't happen due to error exit in get_available_storage)
             STORAGE=$(pvesm status | awk 'NR==2{print $1}')
             if [ -z "$STORAGE" ]; then
                 STORAGE="local-lvm"
