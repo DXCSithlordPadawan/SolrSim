@@ -510,7 +510,7 @@ function install_application() {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
         apt-get upgrade -y
-        apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release wget jq
+        apt-get install -y curl sudo mc apt-transport-https ca-certificates gnupg lsb-release wget jq python3-pip
     "; then
         msg_error "Failed to install basic dependencies"
     fi
@@ -520,21 +520,39 @@ function install_application() {
     if ! pct exec $CT_ID -- bash -c "
         # Add Podman repository
         echo 'deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_22.04/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
-        curl -L 'https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_22.04/Release.key' | apt-key add -
+        
+        # WARNING: Using new keyring method instead of deprecated apt-key
+        # Download and add the signing key to the trusted keyring directory
+        curl -L 'https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_22.04/Release.key' | gpg --dearmor -o /etc/apt/trusted.gpg.d/devel-kubic-libcontainers-stable.gpg
         
         # Update and install Podman
         apt-get update
-        apt-get install -y podman podman-compose
+        apt-get install -y podman
         
-        # Enable and start Podman socket (for Docker compatibility)
-        systemctl --user daemon-reload
-        systemctl enable --now podman.socket || true
+        # Install podman-compose from PyPI since it's not always available as apt package on Ubuntu 22.04
+        pip3 install podman-compose
+        
+        # Create containers config directory if it doesn't exist
+        mkdir -p /etc/containers
+        
+        # Configure Podman for rootless operation
+        echo 'unqualified-search-registries = [\"docker.io\"]' > /etc/containers/registries.conf
         
         # Create podman alias for docker compatibility
         ln -sf /usr/bin/podman /usr/local/bin/docker
         
-        # Configure Podman for rootless operation
-        echo 'unqualified-search-registries = [\"docker.io\"]' > /etc/containers/registries.conf
+        # Enable and start Podman socket (for Docker compatibility) if it exists
+        if systemctl --user list-unit-files | grep -q podman.socket; then
+            # Check if D-Bus is available for user session
+            if systemctl --user status >/dev/null 2>&1; then
+                systemctl --user daemon-reload || true
+                systemctl --user enable --now podman.socket || true
+            else
+                echo 'D-Bus not available for user session, skipping systemctl --user commands'
+            fi
+        else
+            echo 'podman.socket not found, skipping socket configuration'
+        fi
     "; then
         msg_error "Failed to install Podman"
     fi
@@ -555,7 +573,7 @@ function install_application() {
         podman network create traefik || true
         
         # Install Python dependencies
-        apt-get install -y python3 python3-pip python3-venv
+        apt-get install -y python3 python3-venv
     "; then
         msg_error "Failed to install additional tools"
     fi
